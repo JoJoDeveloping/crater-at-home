@@ -7,7 +7,10 @@ use std::{
     iter::once,
     path::PathBuf,
 };
-use tokio::{fs::File, io::AsyncReadExt};
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 
 #[derive(Parser, Clone)]
 pub struct Args {
@@ -174,9 +177,17 @@ pub async fn run(args: Args) -> Result<()> {
         to_rerun.len(),
         to_rerun
     );
+    let newf = to_rerun.into_iter().collect::<Vec<_>>().join("\n");
+    File::create("spurious_crates.txt")
+        .await?
+        .write_all(newf.as_bytes())
+        .await?;
+    let mut total = 0;
     for (k, v) in &count_per_category {
         println!("Category {k:?}: {v}");
+        total += *v;
     }
+    println!("Total: {total}");
     Ok(())
 }
 
