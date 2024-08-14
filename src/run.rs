@@ -12,6 +12,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    sync::Semaphore,
     task::JoinSet,
 };
 use uuid::Uuid;
@@ -109,6 +110,7 @@ pub async fn run(args: Args) -> Result<()> {
         crates = crates.into_iter().rev().collect::<Vec<_>>();
     }
     let crates = Arc::new(Mutex::new(crates));
+    let git_mutex = Arc::new(Semaphore::new(1));
 
     let mut tasks = JoinSet::new();
     for cpu in 0..args.jobs.unwrap_or_else(num_cpus::get) {
@@ -119,6 +121,7 @@ pub async fn run(args: Args) -> Result<()> {
         let test_end_delimiter_with_dashes = format!("-{}-\n", *TEST_END_DELIMITER).into_bytes();
 
         let mut child = spawn_worker(&args, cpu);
+        let git_mutex = git_mutex.clone();
 
         tasks.spawn(async move {
             loop {
@@ -175,7 +178,7 @@ pub async fn run(args: Args) -> Result<()> {
                     stop.checked_duration_since(start)
                 );
 
-                save_and_push_logs(&krate, numcrate, total, &output)
+                save_and_push_logs(&krate, numcrate, total, &output, git_mutex.clone())
                     .await
                     .unwrap();
 
@@ -204,11 +207,13 @@ async fn save_and_push_logs(
     numcrate: usize,
     total: usize,
     output: &[u8],
+    mutex: Arc<Semaphore>,
 ) -> Result<()> {
     let crate_base = format!("{}@{}", krate.name, krate.version);
     let mut file = File::create(format!("output/{crate_base}/global_log.txt"))?;
     file.write_all(output)?;
     drop(file);
+    let lock = mutex.acquire().await?;
     let mut git_add = tokio::process::Command::new("git");
     git_add
         .args(["-C", "output/", "add", crate_base.as_str()])
@@ -251,6 +256,7 @@ async fn save_and_push_logs(
         .spawn()?
         .wait()
         .await?;
+    drop(lock);
     Ok(())
 }
 
