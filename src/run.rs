@@ -202,6 +202,7 @@ pub async fn run(args: Args) -> Result<()> {
                     &output,
                     git_mutex.clone(),
                     last_push.clone(),
+                    &args,
                 )
                 .await
                 .unwrap();
@@ -220,7 +221,7 @@ pub async fn run(args: Args) -> Result<()> {
     while let Some(task) = tasks.join_next().await {
         task?;
     }
-    git_push(git_mutex, last_push, true).await?;
+    git_push(git_mutex, last_push, true, &args).await?;
 
     log::info!("done!");
 
@@ -234,6 +235,7 @@ async fn save_and_push_logs(
     output: &[u8],
     mutex: Arc<Semaphore>,
     lastpush: Arc<Mutex<Instant>>,
+    args: &Args,
 ) -> Result<()> {
     let crate_base = format!("{}@{}", krate.name, krate.version);
     let mut file = File::create(format!("output/{crate_base}/global_log.txt"))?;
@@ -274,7 +276,7 @@ async fn save_and_push_logs(
         .wait()
         .await?;
     drop(lock);
-    git_push(mutex, lastpush, false).await?;
+    git_push(mutex, lastpush, false, &args).await?;
     Ok(())
 }
 
