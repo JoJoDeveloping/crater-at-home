@@ -13,7 +13,7 @@ pub async fn run(args: Args) -> Result<()> {
     let client = Arc::new(Client::new().await?);
 
     log::info!("Updating the cached crates.io database dump");
-    let crates = db_dump::download()?;
+    let (crates, data) = db_dump::download()?;
     let mut name_to_downloads = HashMap::new();
     let mut versions = Vec::new();
     for krate in crates.iter() {
@@ -25,6 +25,8 @@ pub async fn run(args: Args) -> Result<()> {
     client.write_persistent("crates.json", serialized.as_bytes())?;
     let serialized = serde_json::to_string(&name_to_downloads).unwrap();
     client.write_persistent("downloads.json", serialized.as_bytes())?;
+    let serialized = serde_json::to_string(&data).unwrap();
+    client.write_persistent("metadata.json", serialized.as_bytes())?;
 
     Ok(())
 }

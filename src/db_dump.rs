@@ -2,7 +2,8 @@ use crate::{Crate, Status, Version};
 use color_eyre::Result;
 use flate2::read::GzDecoder;
 use fxhash::FxHashMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{collections::hash_map::Entry, io::Read};
 use tar::Archive;
 
@@ -12,7 +13,14 @@ struct PublishedCrate {
     version: Version,
 }
 
-pub fn download() -> Result<Vec<Crate>> {
+#[derive(Serialize)]
+pub struct VersionInfo {
+    folder_name: String,
+    timestamp: String,
+    crates_io_commit: String,
+}
+
+pub fn download() -> Result<(Vec<Crate>, VersionInfo)> {
     log::info!("Downloading crate database");
 
     let mut archive = Vec::new();
@@ -30,12 +38,13 @@ pub fn download() -> Result<Vec<Crate>> {
     let mut version_to_downloads = FxHashMap::default();
     let mut version_to_crate = FxHashMap::default();
     let mut num_to_name = FxHashMap::default();
+    let mut data = None;
 
     for entry in tar.entries()? {
         let entry = entry?;
         let path = entry.path()?;
         let mut components = path.components();
-        components.next(); // The first element of the path is the date
+        let cd = components.next(); // The first element of the path is the date
 
         if components.as_path().to_str() == Some("data/version_downloads.csv") {
             version_to_downloads = decode_downloads(
@@ -51,6 +60,13 @@ pub fn download() -> Result<Vec<Crate>> {
             num_to_name = decode_crates(
                 &archive[entry.raw_file_position() as usize..][..entry.size() as usize],
             )?;
+        }
+        if components.as_path().to_str() == Some("metadata.json") {
+            let json = &archive[entry.raw_file_position() as usize..][..entry.size() as usize];
+            data = Some(decode_metadata(
+                cd.unwrap().as_os_str().as_encoded_bytes(),
+                json,
+            )?);
         }
     }
 
@@ -88,7 +104,7 @@ pub fn download() -> Result<Vec<Crate>> {
         })
         .collect::<Vec<_>>();
     crates.sort_by(|a, b| b.recent_downloads.cmp(&a.recent_downloads));
-    Ok(crates)
+    Ok((crates, data.unwrap()))
 }
 
 #[derive(Deserialize)]
@@ -184,4 +200,15 @@ fn decode_crates(csv: &[u8]) -> Result<FxHashMap<u64, String>> {
         map.insert(record.id, record.name);
     }
     Ok(map)
+}
+
+fn decode_metadata(filename: &[u8], json: &[u8]) -> Result<VersionInfo> {
+    let json: Value = serde_json::from_slice(json)?;
+    let timestamp = json["timestamp"].as_str().unwrap();
+    let commit = json["crates_io_commit"].as_str().unwrap();
+    Ok(VersionInfo {
+        folder_name: String::from_utf8(filename.into())?,
+        timestamp: timestamp.into(),
+        crates_io_commit: commit.into(),
+    })
 }

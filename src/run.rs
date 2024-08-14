@@ -8,6 +8,7 @@ use std::{
     io::Write,
     process::Stdio,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -136,6 +137,7 @@ pub async fn run(args: Args) -> Result<()> {
                 }
 
                 log::info!("Running {} {}", krate.name, krate.version);
+                let start = Instant::now();
 
                 child
                     .stdin
@@ -164,7 +166,14 @@ pub async fn run(args: Args) -> Result<()> {
                     continue;
                 }
 
-                log::info!("Uploading to Git server {} {}", krate.name, krate.version);
+                let stop = Instant::now();
+
+                log::info!(
+                    "Uploading to Git server {} {} -- testing took {:?}",
+                    krate.name,
+                    krate.version,
+                    stop.checked_duration_since(start)
+                );
 
                 save_and_push_logs(&krate, numcrate, total, &output)
                     .await
