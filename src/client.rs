@@ -18,7 +18,7 @@ use std::path::PathBuf;
 pub struct Client {}
 
 fn mkpath(key: &str) -> PathBuf {
-    let pp = Path::new("persistent").join(key);
+    let pp = Path::new("output").join(key);
     std::fs::create_dir_all(pp.parent().unwrap());
     pp
 }

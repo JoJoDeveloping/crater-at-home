@@ -101,6 +101,7 @@ pub async fn run(args: Args) -> Result<()> {
     log::info!("Figuring out what crates have a build log already");
     let client = Arc::new(Client::new().await?);
     let mut crates = build_crate_list(&args, &client).await?;
+    let total = crates.len();
 
     if !args.rev {
         // We are going to pop crates from this, so we now need to invert the order
@@ -121,9 +122,13 @@ pub async fn run(args: Args) -> Result<()> {
         tasks.spawn(async move {
             loop {
                 let mut stdout = BufReader::new(child.stdout.as_mut().unwrap());
-                let krate = match crates.lock().unwrap().pop() {
-                    None => break,
-                    Some(krate) => krate,
+                let (krate, numcrate) = {
+                    let mut foo = crates.lock().unwrap();
+                    let nxtcrate = match foo.pop() {
+                        None => break,
+                        Some(krate) => krate,
+                    };
+                    (nxtcrate, total - foo.len())
                 };
 
                 if IGNORED_CRATES.contains(&&krate.name[..]) {
@@ -161,9 +166,17 @@ pub async fn run(args: Args) -> Result<()> {
 
                 log::info!("Uploading to Git server {} {}", krate.name, krate.version);
 
-                save_and_push_logs(&krate, &output).await.unwrap();
+                save_and_push_logs(&krate, numcrate, total, &output)
+                    .await
+                    .unwrap();
 
-                log::info!("Finished {} {}", krate.name, krate.version);
+                log::info!(
+                    "Finished {} {}, which was crate {} out of {}!",
+                    krate.name,
+                    krate.version,
+                    numcrate,
+                    total
+                );
             }
         });
     }
@@ -177,7 +190,12 @@ pub async fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-async fn save_and_push_logs(krate: &Crate, output: &[u8]) -> Result<()> {
+async fn save_and_push_logs(
+    krate: &Crate,
+    numcrate: usize,
+    total: usize,
+    output: &[u8],
+) -> Result<()> {
     let crate_base = format!("{}@{}", krate.name, krate.version);
     let mut file = File::create(format!("output/{crate_base}/global_log.txt"))?;
     file.write_all(output)?;
@@ -201,7 +219,13 @@ async fn save_and_push_logs(krate: &Crate, output: &[u8]) -> Result<()> {
             "--only",
             crate_base.as_str(),
             "-m",
-            crate_base.as_str(),
+            format!(
+                "Run for {}, which is crate {}/{}",
+                crate_base.as_str(),
+                numcrate,
+                total
+            )
+            .as_str(),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
