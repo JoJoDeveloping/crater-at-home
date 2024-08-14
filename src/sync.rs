@@ -1,15 +1,13 @@
-use crate::{client::Client, db_dump, Crate};
-use aws_smithy_types_convert::date_time::DateTimeExt;
+use crate::{client::Client, db_dump};
 use clap::Parser;
-use color_eyre::{Report, Result};
-use std::{collections::HashMap, fmt::Write, sync::Arc};
-use tokio::{sync::Mutex, sync::Semaphore, task::JoinSet};
+use color_eyre::Result;
+use std::{collections::HashMap, sync::Arc};
 
 #[derive(Parser)]
 pub struct Args {}
 
 #[tokio::main]
-pub async fn run(args: Args) -> Result<()> {
+pub async fn run(_args: Args) -> Result<()> {
     let client = Arc::new(Client::new().await?);
 
     log::info!("Updating the cached crates.io database dump");

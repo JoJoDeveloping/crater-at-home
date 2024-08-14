@@ -1,14 +1,7 @@
 use crate::{Crate, Status, Version};
-use aws_sdk_s3::model::{CompletedMultipartUpload, CompletedPart, Object};
-use aws_smithy_types_convert::date_time::DateTimeExt;
-use backoff::Error;
-use backoff::ExponentialBackoff;
 use color_eyre::Result;
-use futures_util::StreamExt;
-use futures_util::TryFutureExt;
 use std::collections::HashMap;
 use std::fs::File;
-use std::future::Future;
 use std::io::Read;
 use std::io::Write;
 use std::path::Path;
@@ -19,7 +12,7 @@ pub struct Client {}
 
 fn mkpath(key: &str) -> PathBuf {
     let pp = Path::new("output").join(key);
-    std::fs::create_dir_all(pp.parent().unwrap());
+    std::fs::create_dir_all(pp.parent().unwrap()).unwrap();
     pp
 }
 
@@ -37,10 +30,11 @@ impl Client {
     pub fn read_persistent(&self, key: &str) -> Result<Vec<u8>> {
         let mut file = File::open(mkpath(key))?;
         let mut buf = Vec::new();
-        let res = file.read_to_end(&mut buf)?;
+        let _res = file.read_to_end(&mut buf)?;
         Ok(buf)
     }
 
+    #[allow(unused)]
     pub async fn get_crate_downloads(&self) -> Result<HashMap<String, Option<u64>>> {
         let blob = self.read_persistent("downloads.json")?;
         let crates: HashMap<_, _> = serde_json::from_slice(&blob)?;

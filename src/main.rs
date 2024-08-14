@@ -1,6 +1,6 @@
 use clap::Parser;
 use color_eyre::Result;
-use std::{fmt, str::FromStr};
+use std::fmt;
 
 mod client;
 mod db_dump;

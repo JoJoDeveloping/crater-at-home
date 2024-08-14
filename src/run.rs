@@ -117,7 +117,7 @@ pub async fn run(args: Args) -> Result<()> {
     for cpu in 0..args.jobs.unwrap_or_else(num_cpus::get) {
         let crates = crates.clone();
         let args = args.clone();
-        let client = client.clone();
+        let _client = client.clone();
 
         let test_end_delimiter_with_dashes = format!("-{}-\n", *TEST_END_DELIMITER).into_bytes();
 
@@ -205,7 +205,7 @@ pub async fn run(args: Args) -> Result<()> {
     while let Some(task) = tasks.join_next().await {
         task?;
     }
-    git_push(git_mutex, last_push, true).await;
+    git_push(git_mutex, last_push, true).await?;
 
     log::info!("done!");
 
@@ -259,7 +259,7 @@ async fn save_and_push_logs(
         .wait()
         .await?;
     drop(lock);
-    git_push(mutex, lastpush, false);
+    git_push(mutex, lastpush, false).await?;
     Ok(())
 }
 
