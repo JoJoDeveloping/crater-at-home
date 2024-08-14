@@ -35,10 +35,10 @@ function run_check {
 }
 
 function run_miri {
-    echo "Running miri, kind $KIND, target $TARGET"
+    echo "Running miri, kind $KIND, target $TARGET, profile $PROFILE"
     mkdir -p $OUTPUTDIR/$KIND
     MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" timed miri test --no-run $ARGS &> /dev/null
-    MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" timed miri nextest run --hide-progress-bar --no-fail-fast -j1 --config-file=/root/.cargo/nextest.toml $ARGS
+    MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" timed miri nextest run --hide-progress-bar --no-fail-fast -j1 --config-file=/root/.cargo/nextest.toml --profile $PROFILE $ARGS
     sleep 0.5 # maybe this prevents spurious file missing issues
     mv target/nextest/default-miri/junit.xml $OUTPUTDIR/$KIND/junit.xml
     # nextest runs one interpreter per test, so unsupported errors only terminate the test not the whole suite.
@@ -47,9 +47,9 @@ function run_miri {
 }
 
 function run_miri_thrice {
-    KIND=noborrows EXTRAMIRIFLAGS="-Zmiri-disable-stacked-borrows" run_miri
-    KIND=stackedborrows EXTRAMIRIFLAGS="" run_miri
-    KIND=treeborrows EXTRAMIRIFLAGS="-Zmiri-tree-borrows" run_miri
+    KIND=noborrows EXTRAMIRIFLAGS="-Zmiri-disable-stacked-borrows" PROFILE="default-miri" run_miri
+    KIND=stackedborrows EXTRAMIRIFLAGS="" PROFILE="slow-miri" run_miri
+    KIND=treeborrows EXTRAMIRIFLAGS="-Zmiri-tree-borrows" PROFILE="slow-miri" run_miri
 }
 
 timed miri setup &> /dev/null

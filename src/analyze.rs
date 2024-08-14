@@ -1,11 +1,12 @@
 use clap::Parser;
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{eyre, Result};
 use roxmltree::{Document, Node};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt::Display,
     iter::once,
     path::PathBuf,
+    process::Stdio,
 };
 use tokio::{
     fs::File,
@@ -14,6 +15,9 @@ use tokio::{
 
 #[derive(Parser, Clone)]
 pub struct Args {
+    #[clap(long, action)]
+    no_pull: bool,
+
     folder: String,
 }
 
@@ -125,12 +129,18 @@ fn analyze(
 
 #[tokio::main]
 pub async fn run(args: Args) -> Result<()> {
+    if !args.no_pull {
+        git_pull(&args.folder).await?;
+    }
     let mut entries = tokio::fs::read_dir(args.folder).await?;
     let mut rs = HashMap::new();
     let mut to_rerun = HashSet::new();
     let mut count_per_category = BTreeMap::new();
+    let mut total_crates = 0;
+    let mut crates_with_tests = 0;
     'nextcrate: while let Some(entry) = entries.next_entry().await? {
         if entry.metadata().await?.is_dir() {
+            total_crates += 1;
             let krate_name =
                 String::from_utf8_lossy(entry.file_name().as_encoded_bytes()).to_string();
             if krate_name.chars().next().unwrap() == '.' {
@@ -151,6 +161,7 @@ pub async fn run(args: Args) -> Result<()> {
             res_tb.keys().cloned().for_each(|x| {
                 keyset.insert(x);
             });
+            let mut hadtest = false;
             for key in keyset {
                 let ana = analyze(res_nb.get(&key), res_sb.get(&key), res_tb.get(&key));
                 match ana {
@@ -164,10 +175,17 @@ pub async fn run(args: Args) -> Result<()> {
                     ClassificationResult::FilteredCuriously => {
                         log::warn!("Test {key} started succeeding after being filtered!");
                     }
+                    ClassificationResult::OnlyStacks => {
+                        // log::info!("Test {key} is OnlyStacks!");
+                    }
                     _ => {}
                 }
                 rs.insert(key, ana);
                 *count_per_category.entry(ana).or_insert(0) += 1;
+                hadtest = true;
+            }
+            if hadtest {
+                crates_with_tests += 1;
             }
         }
     }
@@ -187,7 +205,30 @@ pub async fn run(args: Args) -> Result<()> {
         println!("Category {k:?}: {v}");
         total += *v;
     }
-    println!("Total: {total}");
+    println!(
+        "Total: {total} tests from {crates_with_tests} crates, with {total_crates} tested in total (including crates without tests)"
+    );
+    let cn = count_per_category
+        .get(&ClassificationResult::FilteredCuriously)
+        .copied()
+        .unwrap_or(0u32);
+    let rfn = count_per_category
+        .get(&ClassificationResult::Filtered)
+        .copied()
+        .unwrap_or(0);
+    let total_succ_fst: u32 = [
+        ClassificationResult::SucceedAll,
+        ClassificationResult::OnlyStacks,
+        ClassificationResult::OnlyTrees,
+        ClassificationResult::FailBoth,
+    ]
+    .iter()
+    .map(|x| count_per_category.get(&x).copied())
+    .map(|x| x.unwrap_or(0))
+    .sum();
+    let flaky_number = f64::from(cn) / f64::from(cn + rfn);
+    let expected_flaky_sometimes_fail = f64::from(total_succ_fst) * flaky_number;
+    println!("As a rough approximation, you can expect that {expected_flaky_sometimes_fail:.4} tests in the latter 3 categories are flaky.");
     Ok(())
 }
 
@@ -258,4 +299,23 @@ async fn read_junit_file(
     }
 
     Ok(result)
+}
+
+async fn git_pull(folder: &String) -> Result<()> {
+    log::info!("Pulling {folder}");
+    let mut git_pull = tokio::process::Command::new("git");
+    let ec = git_pull
+        .args(["-C", folder.as_str(), "pull", "--quiet"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?
+        .wait()
+        .await?;
+    if ec.success() {
+        log::info!("Pulling successful!");
+        Ok(())
+    } else {
+        Err(eyre!("git pull failed!"))
+    }
 }
