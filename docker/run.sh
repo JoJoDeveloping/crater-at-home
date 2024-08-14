@@ -1,7 +1,7 @@
 set -u
 exec 2>&1
 
-# export TERM=xterm-256color
+# export TERM=xterm
 
 # Extract the cache if it exists
 # Ideally it's just an error to not have a cache, but this script is executed to build the cache.
@@ -35,7 +35,7 @@ function run_check {
 }
 
 function run_miri {
-    echo "Running miri, kind $KIND"
+    echo "Running miri, kind $KIND, target $TARGET"
     mkdir -p $OUTPUTDIR/$KIND
     MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" timed miri test --no-run $ARGS &> /dev/null
     MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" timed miri nextest run --hide-progress-bar --no-fail-fast --config-file=/root/.cargo/nextest.toml $ARGS

@@ -15,14 +15,14 @@ COPY run.sh /root/run.sh
 COPY .gitconfig /root/.gitconfig
     
 
-RUN mkdir /build /output && \
-    rm -rf /root/.cache && \
-    for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do \
+RUN mkdir /build /output
+RUN rm -rf /root/.cache
+RUN for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do \
         echo "cfg-if@1.0.0" | TOOL=miri TARGET=$target TEST_END_DELIMITER="-" bash /root/run.sh; \
-    done && \
-    tar czvf /cache.tar.gz /root/.cache && \
-    rm -rf /root/.cache /build && \
-    rm -rf /output
+    done
+RUN tar czvf /cache.tar.gz /root/.cache
+RUN rm -rf /root/.cache /build
+RUN rm -rf /output
 
 RUN mkdir /output
 # RUN cd /output && git init && git commit --allow-empty -m "Initial commit" && git remote 
