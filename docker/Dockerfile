@@ -12,14 +12,19 @@ RUN apt-get update && apt-get install -y curl build-essential && \
 
 COPY nextest.toml /root/.cargo/nextest.toml
 COPY run.sh /root/run.sh
+COPY .gitconfig /root/.gitconfig
+    
 
-RUN mkdir /build && \
+RUN mkdir /build /output && \
     rm -rf /root/.cache && \
     for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do \
         echo "cfg-if@1.0.0" | TOOL=miri TARGET=$target TEST_END_DELIMITER="-" bash /root/run.sh; \
     done && \
-    echo "cfg-if@1.0.0" | TOOL=asan TARGET=$(rustc -vV | grep host | cut -d' ' -f2) TEST_END_DELIMITER="-" bash /root/run.sh && \
     tar czvf /cache.tar.gz /root/.cache && \
-    rm -rf /root/.cache /build
+    rm -rf /root/.cache /build && \
+    rm -rf /output
+
+RUN mkdir /output
+# RUN cd /output && git init && git commit --allow-empty -m "Initial commit" && git remote 
 
 ENTRYPOINT ["/usr/bin/nice", "-n19", "bash", "/root/run.sh"]

@@ -21,71 +21,51 @@ elif [[ $TARGET == "aarch64-unknown-linux-gnu" ]]; then
     export RUSTFLAGS="$RUSTFLAGS -Ctarget-cpu=apple-a14"
 fi
 
-if [[ $TOOL == "build" ]]; then
-    export RUSTFLAGS="$RUSTFLAGS -Zmir-opt-level=4 -Zinline-mir -Cdebuginfo=2 -Cdebug-assertions=yes -Copt-level=3 -Zcross-crate-inline-threshold=always -Zthreads=64 -Zinline-mir-hint-threshold=10000 -Zinline-mir-threshold=10000 -Zmir-enable-passes=-DataflowConstProp"
-elif [[ $TOOL == "asan" ]]; then
-    # Use 1 GB for a default stack size.
-    # We really want to only run out of stack in true infinite recursion.
-    ulimit -s 1048576
-    export RUST_MIN_STACK=1073741824
-    export RUSTFLAGS="$RUSTFLAGS -Cdebuginfo=1 -Zstrict-init-checks=no"
-    export ASAN_OPTIONS="color=always:detect_leaks=0:detect_stack_use_after_return=true:allocator_may_return_null=1:detect_invalid_pointer_pairs=2"
-elif [[ $TOOL == "miri" ]]; then
-    export RUSTFLAGS="$RUSTFLAGS -Zrandomize-layout -Cdebuginfo=1"
-    export MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks -Zmiri-num-cpus=64"
-fi
+export RUSTFLAGS="$RUSTFLAGS -Zrandomize-layout -Cdebuginfo=1 -Zlayout-seed=3405691582"
+export MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks -Zmiri-num-cpus=4 -Zmiri-strict-provenance"
 export RUSTDOCFLAGS=$RUSTFLAGS
+export NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1
 
 function timed {
     timeout --kill-after=10s 1h inapty cargo +$TOOLCHAIN "$@" --target=$TARGET
-}
-
-function run_build {
-    timed test --no-run $ARGS
 }
 
 function run_check {
     timed check $ARGS
 }
 
-function run_asan {
-    timed careful test -Zcareful-sanitizer=address --no-run $ARGS &> /dev/null
-    timed careful test -Zcareful-sanitizer=address --color=always --no-fail-fast $ARGS
-}
-
 function run_miri {
-    timed miri test --no-run $ARGS &> /dev/null
+    echo "Running miri, kind $KIND"
+    mkdir -p $OUTPUTDIR/$KIND
+    MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" timed miri test --no-run $ARGS &> /dev/null
     # rustdoc is already passed --color=always, so adding it to the global MIRIFLAGS is just an error
-    MIRIFLAGS="$MIRIFLAGS --color=always" timed miri nextest run --color=always --no-fail-fast --config-file=/root/.cargo/nextest.toml $ARGS
+    MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS --color=always" timed miri nextest run --color=always --no-fail-fast --config-file=/root/.cargo/nextest.toml $ARGS
+    mv target/nextest/default-miri/junit.xml $OUTPUTDIR/$KIND/junit.xml
     # nextest runs one interpreter per test, so unsupported errors only terminate the test not the whole suite.
     # But we need to panic on unsupported for doctests, because nextest doesn't support doctests.
-    MIRIFLAGS="$MIRIFLAGS -Zmiri-panic-on-unsupported" timed miri test --doc --no-fail-fast $ARGS
+    MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS -Zmiri-panic-on-unsupported" timed miri test --doc --no-fail-fast $ARGS 2>&1 | tee $OUTPUTDIR/$KIND/doctest.out
 }
 
-if [[ $TOOL == "miri" ]]; then
-    timed miri setup &> /dev/null
-fi
+function run_miri_thrice {
+    KIND=noborrows EXTRAMIRIFLAGS="-Zmiri-disable-stacked-borrows" run_miri
+    KIND=stackedborrows EXTRAMIRIFLAGS="" run_miri
+    KIND=treeborrows EXTRAMIRIFLAGS="-Zmiri-tree-borrows" run_miri
+}
+
+timed miri setup &> /dev/null
 
 while read crate;
 do
     cd /build
+    export OUTPUTDIR=/output/$crate
     # Delete everything in our writable mount points
     find /build /tmp /root/.cargo/registry -mindepth 1 -delete
     if cargo download $crate /build; then
         ARGS=$(get-args $crate)
         cargo update &> /dev/null
-        if [[ $TOOL == "build" ]]; then
-            run_build
-        elif [[ $TOOL == "check" ]]; then
-            run_check
-        elif [[ $TOOL == "asan" ]]; then
-            run_asan
-        elif [[ $TOOL == "miri" ]]; then
-            run_miri
-        else
-            exit 1
-        fi
+        run_miri_thrice
     fi
+    chown -R 1000:1000 $OUTPUTDIR
     echo "-${TEST_END_DELIMITER}-"
     # Delete everything in our writable mount points
     find /build /tmp /root/.cargo/registry -mindepth 1 -delete

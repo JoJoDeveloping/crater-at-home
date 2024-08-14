@@ -1,2 +1,6 @@
 target/
 ansi-to-html/fuzz/corpus
+persistent/
+output/
+pp2/
+/logpusher-token

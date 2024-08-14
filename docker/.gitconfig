@@ -1,0 +1,7 @@
+[user]
+        name = Crater At Home
+        email = jhostert@mpi-sws.org
+[init]
+        defaultBranch = master
+[safe]
+        directory = /output

@@ -1,12 +1,9 @@
 use clap::Parser;
 use color_eyre::Result;
-use diagnose::diagnose;
 use std::{fmt, str::FromStr};
 
 mod client;
 mod db_dump;
-mod diagnose;
-mod render;
 mod run;
 mod sync;
 
@@ -36,77 +33,6 @@ fn main() -> Result<()> {
     match args.command {
         Commands::Run(args) => run::run(args),
         Commands::Sync(args) => sync::run(args),
-    }
-}
-
-#[derive(Clone, Copy)]
-pub enum Tool {
-    Miri,
-    Asan,
-    Build,
-    Check,
-}
-
-impl Tool {
-    pub fn raw_path(self) -> &'static str {
-        match self {
-            Tool::Miri => "miri/raw",
-            Tool::Asan => "asan/raw",
-            Tool::Build => "build/raw",
-            Tool::Check => "check/raw",
-        }
-    }
-
-    pub fn raw_crate_path(self, krate: &Crate) -> String {
-        format!("{}/{}/{}", self.raw_path(), krate.name, krate.version)
-    }
-
-    pub fn html_path(self) -> &'static str {
-        match self {
-            Tool::Miri => "miri/logs",
-            Tool::Asan => "asan/logs",
-            Tool::Build => "build/logs",
-            Tool::Check => "check/logs",
-        }
-    }
-
-    pub fn rendered_crate_path(self, krate: &Crate) -> String {
-        format!("{}/{}/{}", self.html_path(), krate.name, krate.version)
-    }
-
-    pub fn landing_page_path(self) -> &'static str {
-        match self {
-            Tool::Miri => "miri/index.html",
-            Tool::Asan => "asan/index.html",
-            Tool::Build => "build/index.html",
-            Tool::Check => "check/index.html",
-        }
-    }
-}
-
-impl fmt::Display for Tool {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Tool::Miri => "miri",
-            Tool::Asan => "asan",
-            Tool::Build => "build",
-            Tool::Check => "check",
-        };
-        f.write_str(s)
-    }
-}
-
-impl FromStr for Tool {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "miri" => Ok(Self::Miri),
-            "asan" => Ok(Self::Asan),
-            "build" => Ok(Self::Build),
-            "check" => Ok(Self::Check),
-            _ => Err(format!("Invalid tool {}", s)),
-        }
     }
 }
 

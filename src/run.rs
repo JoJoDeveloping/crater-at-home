@@ -1,10 +1,11 @@
-use crate::{client::Client, render, Crate, Tool, Version};
+use crate::{client::Client, Crate, Version};
 use clap::Parser;
 use color_eyre::eyre::Result;
 use once_cell::sync::Lazy;
 use std::{
     collections::HashMap,
-    fs,
+    fs::{self, File},
+    io::Write,
     process::Stdio,
     sync::{Arc, Mutex},
 };
@@ -36,15 +37,6 @@ pub struct Args {
 
     #[clap(long, default_value_t = 8)]
     memory_limit_gb: usize,
-
-    #[clap(long)]
-    rerun: bool,
-
-    #[clap(long)]
-    pub tool: Tool,
-
-    #[clap(long)]
-    pub bucket: String,
 
     #[clap(long)]
     jobs: Option<usize>,
@@ -107,18 +99,8 @@ pub async fn run(args: Args) -> Result<()> {
     color_eyre::eyre::ensure!(status.success(), "docker image build failed!");
 
     log::info!("Figuring out what crates have a build log already");
-    let client = Arc::new(Client::new(args.tool, &args.bucket).await?);
+    let client = Arc::new(Client::new().await?);
     let mut crates = build_crate_list(&args, &client).await?;
-    if !args.rerun {
-        let finished_crates = client
-            .list_finished_crates(Some(time::Duration::days(90)))
-            .await?;
-        crates.retain(|krate| {
-            !finished_crates
-                .iter()
-                .any(|c| c.name == krate.name && c.version == krate.version)
-        });
-    }
 
     if !args.rev {
         // We are going to pop crates from this, so we now need to invert the order
@@ -169,7 +151,6 @@ pub async fn run(args: Args) -> Result<()> {
                         break;
                     }
                 }
-                log::debug!("{:?}", output);
 
                 if let Ok(Some(_)) = child.try_wait() {
                     log::warn!("A worker crashed! Standing up a new one...");
@@ -178,15 +159,9 @@ pub async fn run(args: Args) -> Result<()> {
                     continue;
                 }
 
-                // Render HTML for the stderr/stdout we captured
-                let rendered = render::render_crate(&krate, &output);
+                log::info!("Uploading to Git server {} {}", krate.name, krate.version);
 
-                // Upload both
-                client.upload_raw(&krate, output).await.unwrap();
-                client
-                    .upload_html(&krate, rendered.into_bytes())
-                    .await
-                    .unwrap();
+                save_and_push_logs(&krate, &output).await.unwrap();
 
                 log::info!("Finished {} {}", krate.name, krate.version);
             }
@@ -199,6 +174,50 @@ pub async fn run(args: Args) -> Result<()> {
 
     log::info!("done!");
 
+    Ok(())
+}
+
+async fn save_and_push_logs(krate: &Crate, output: &[u8]) -> Result<()> {
+    let crate_base = format!("{}@{}", krate.name, krate.version);
+    let mut file = File::create(format!("output/{crate_base}/global_log.txt"))?;
+    file.write_all(output)?;
+    drop(file);
+    let mut git_add = tokio::process::Command::new("git");
+    git_add
+        .args(["-C", "output/", "add", crate_base.as_str()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()?
+        .wait()
+        .await?;
+    let mut git_commit = tokio::process::Command::new("git");
+    git_commit
+        .args([
+            "-C",
+            "output/",
+            "commit",
+            "--quiet",
+            "--only",
+            crate_base.as_str(),
+            "-m",
+            crate_base.as_str(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()?
+        .wait()
+        .await?;
+    let mut git_push = tokio::process::Command::new("git");
+    git_push
+        .args(["-C", "output/", "push"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()?
+        .wait()
+        .await?;
     Ok(())
 }
 
@@ -216,6 +235,17 @@ fn spawn_worker(args: &Args, cpu: usize) -> tokio::process::Child {
         "--read-only",
         // The directory we are building in (not just its target dir!) is all writable
         "--volume=/build",
+        // The directory we are building in (not just its target dir!) is all writable
+        format!(
+            "--mount=type=bind,source={},target=/output",
+            std::env::current_dir()
+                .unwrap()
+                .join("output")
+                .as_os_str()
+                .to_str()
+                .unwrap()
+        )
+        .as_str(),
         // rustdoc tries to write to and executes files in /tmp, odd move but whatever
         "--tmpfs=/tmp:exec",
         // The default cargo registry location; we download dependences in the sandbox
@@ -223,7 +253,6 @@ fn spawn_worker(args: &Args, cpu: usize) -> tokio::process::Child {
         // cargo-miri builds a sysroot under /root/.cache, so why not make it all writeable
         "--tmpfs=/root/.cache:exec",
         &format!("--env=TEST_END_DELIMITER={}", *TEST_END_DELIMITER),
-        &format!("--env=TOOL={}", args.tool),
         &format!("--env=TARGET={}", args.target),
     ]);
     cmd.args([
@@ -235,7 +264,7 @@ fn spawn_worker(args: &Args, cpu: usize) -> tokio::process::Child {
     ])
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
+    .stderr(Stdio::inherit())
     .spawn()
     .unwrap()
 }
