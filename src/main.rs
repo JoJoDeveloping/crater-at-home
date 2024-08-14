@@ -1,4 +1,3 @@
-#![feature(os_str_display)]
 use clap::Parser;
 use color_eyre::Result;
 use std::{fmt, str::FromStr};
