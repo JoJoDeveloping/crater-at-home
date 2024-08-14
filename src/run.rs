@@ -40,6 +40,9 @@ pub struct Args {
     #[clap(long, default_value_t = 8)]
     memory_limit_gb: usize,
 
+    #[clap(long, action)]
+    no_push: bool,
+
     #[clap(long)]
     jobs: Option<usize>,
 
@@ -275,7 +278,12 @@ async fn save_and_push_logs(
     Ok(())
 }
 
-async fn git_push(mutex: Arc<Semaphore>, lastpush: Arc<Mutex<Instant>>, force: bool) -> Result<()> {
+async fn git_push(
+    mutex: Arc<Semaphore>,
+    lastpush: Arc<Mutex<Instant>>,
+    force: bool,
+    args: &Args,
+) -> Result<()> {
     let doit = force || {
         let mut mv = lastpush.lock().unwrap();
         if let Some(x) = Instant::now().checked_duration_since(*mv) {
@@ -294,15 +302,19 @@ async fn git_push(mutex: Arc<Semaphore>, lastpush: Arc<Mutex<Instant>>, force: b
         return Ok(());
     }
     let lock = mutex.acquire().await?;
-    /*let mut git_push = tokio::process::Command::new("git");
-    git_push
-        .args(["-C", "output/", "push"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()?
-        .wait()
-        .await?;*/
+    if args.no_push {
+        log::info!("no_push was specified, not actually pushing!");
+    } else {
+        let mut git_push = tokio::process::Command::new("git");
+        git_push
+            .args(["-C", "output/", "push"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()?
+            .wait()
+            .await?;
+    }
     drop(lock);
     Ok(())
 }
