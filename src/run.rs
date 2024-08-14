@@ -265,9 +265,10 @@ async fn save_and_push_logs(
 
 async fn git_push(mutex: Arc<Semaphore>, lastpush: Arc<Mutex<Instant>>, force: bool) -> Result<()> {
     let doit = force || {
-        let mv = lastpush.lock().unwrap();
+        let mut mv = lastpush.lock().unwrap();
         if let Some(x) = Instant::now().checked_duration_since(*mv) {
             if x > Duration::from_secs(60) {
+                *mv = Instant::now();
                 true
             } else {
                 false
