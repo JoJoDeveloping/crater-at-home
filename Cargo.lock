@@ -431,7 +431,7 @@ dependencies = [
  "http",
  "pretty_assertions",
  "regex",
- "roxmltree",
+ "roxmltree 0.14.1",
  "serde_json",
  "thiserror",
 ]
@@ -718,6 +718,7 @@ dependencies = [
  "num_cpus",
  "once_cell",
  "regex",
+ "roxmltree 0.20.0",
  "semver",
  "serde",
  "serde_json",
@@ -1593,6 +1594,12 @@ checksum = "921904a62e410e37e215c40381b7117f830d9d89ba60ab5236170541dd25646b"
 dependencies = [
  "xmlparser",
 ]
+
+[[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rustc-demangle"

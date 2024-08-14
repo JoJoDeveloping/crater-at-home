@@ -1,6 +1,6 @@
 use crate::{client::Client, Crate, Version};
 use clap::Parser;
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{eyre, Result};
 use once_cell::sync::Lazy;
 use std::{
     collections::HashMap,
@@ -54,7 +54,8 @@ pub struct Args {
     target: String,
 }
 
-async fn build_crate_list(args: &Args, client: &Client) -> Result<Vec<Crate>> {
+async fn build_crate_list(args: &Args, client: &Client) -> Result<(Vec<Crate>, bool)> {
+    let mut rebuild_all = false;
     let all_crates = client.get_crate_versions().await?;
     let crates = if let Some(crate_list) = &args.crate_list {
         let crate_list = fs::read_to_string(crate_list).unwrap();
@@ -77,15 +78,17 @@ async fn build_crate_list(args: &Args, client: &Client) -> Result<Vec<Crate>> {
             }
         }
         crates.sort_by(|a, b| a.recent_downloads.cmp(&b.recent_downloads));
+        rebuild_all = true;
         crates
     } else if let Some(crate_count) = args.crates {
         let mut crates = all_crates;
         crates.truncate(crate_count);
+
         crates
     } else {
         all_crates
     };
-    Ok(crates)
+    Ok((crates, rebuild_all))
 }
 
 #[tokio::main]
@@ -102,7 +105,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     log::info!("Figuring out what crates have a build log already");
     let client = Arc::new(Client::new().await?);
-    let mut crates = build_crate_list(&args, &client).await?;
+    let (mut crates, rebuild_all) = build_crate_list(&args, &client).await?;
     let total = crates.len();
 
     if !args.rev {
@@ -138,6 +141,15 @@ pub async fn run(args: Args) -> Result<()> {
                 };
 
                 if IGNORED_CRATES.contains(&&krate.name[..]) {
+                    continue;
+                }
+
+                if !rebuild_all && git_check_crate_committed(&git_mutex, &krate).await.unwrap() {
+                    log::info!(
+                        "Skipping {} {} as it is already committed",
+                        krate.name,
+                        krate.version
+                    );
                     continue;
                 }
 
@@ -282,7 +294,7 @@ async fn git_push(mutex: Arc<Semaphore>, lastpush: Arc<Mutex<Instant>>, force: b
         return Ok(());
     }
     let lock = mutex.acquire().await?;
-    let mut git_push = tokio::process::Command::new("git");
+    /*let mut git_push = tokio::process::Command::new("git");
     git_push
         .args(["-C", "output/", "push"])
         .stdin(Stdio::piped())
@@ -290,9 +302,35 @@ async fn git_push(mutex: Arc<Semaphore>, lastpush: Arc<Mutex<Instant>>, force: b
         .stderr(Stdio::inherit())
         .spawn()?
         .wait()
-        .await?;
+        .await?;*/
     drop(lock);
     Ok(())
+}
+
+async fn git_check_crate_committed(mutex: &Arc<Semaphore>, krate: &Crate) -> Result<bool> {
+    let crate_base = format!("{}@{}", krate.name, krate.version);
+    let lock = mutex.acquire().await?;
+    let mut git_add = tokio::process::Command::new("git");
+    let status = git_add
+        .args([
+            "-C",
+            "output/",
+            "ls-files",
+            "--error-unmatch",
+            format!("{}/global_log.txt", crate_base.as_str()).as_str(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?
+        .wait()
+        .await?;
+    drop(lock);
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(eyre!("invalid return code!")),
+    }
 }
 
 fn spawn_worker(args: &Args, cpu: usize) -> tokio::process::Child {

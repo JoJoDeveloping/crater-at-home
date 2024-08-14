@@ -2,6 +2,7 @@ use clap::Parser;
 use color_eyre::Result;
 use std::fmt;
 
+mod analyze;
 mod client;
 mod db_dump;
 mod run;
@@ -17,6 +18,7 @@ struct Cli {
 enum Commands {
     Run(run::Args),
     Sync(sync::Args),
+    Analyze(analyze::Args),
 }
 
 fn main() -> Result<()> {
@@ -33,6 +35,7 @@ fn main() -> Result<()> {
     match args.command {
         Commands::Run(args) => run::run(args),
         Commands::Sync(args) => sync::run(args),
+        Commands::Analyze(args) => analyze::run(args),
     }
 }
 
