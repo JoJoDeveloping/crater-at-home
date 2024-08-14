@@ -40,7 +40,7 @@ function run_miri {
     MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" timed miri test --no-run $ARGS &> /dev/null
     MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" timed miri nextest run --hide-progress-bar --no-fail-fast -j1 --config-file=/root/.cargo/nextest.toml --profile $PROFILE $ARGS
     sleep 0.5 # maybe this prevents spurious file missing issues
-    mv target/nextest/default-miri/junit.xml $OUTPUTDIR/$KIND/junit.xml
+    mv target/nextest/$PROFILE/junit.xml $OUTPUTDIR/$KIND/junit.xml
     # nextest runs one interpreter per test, so unsupported errors only terminate the test not the whole suite.
     # But we need to panic on unsupported for doctests, because nextest doesn't support doctests.
     MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS -Zmiri-panic-on-unsupported" timed miri test --doc --no-fail-fast $ARGS 2>&1 | tee $OUTPUTDIR/$KIND/doctest.out

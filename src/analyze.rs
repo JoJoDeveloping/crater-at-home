@@ -17,6 +17,8 @@ use tokio::{
 pub struct Args {
     #[clap(long, action)]
     no_pull: bool,
+    #[clap(long, action)]
+    explain: bool,
 
     folder: String,
 }
@@ -85,6 +87,22 @@ enum ClassificationResult {
     FailBoth,
     OnlyTrees,
     OnlyStacks,
+}
+
+impl ClassificationResult {
+    pub fn describe(self) -> &'static str {
+        match self {
+            ClassificationResult::MissingPartially => "The test did not exist in some miri modes. This should not happen.",
+            ClassificationResult::Filtered => "The test failed already without any aliasing model (due to e.g. foreign functions or int-to-ptr casts), we exclude it from analysis.",
+            ClassificationResult::FilteredCuriously => "The test failed without any aliasing model, but it later worked _with_ an aliasing model. It is a flaky test and still excluded.",
+            ClassificationResult::FilteredTimeout => "The test ran into a timeout without the aliasing model.",
+            ClassificationResult::UnfilteredTimeout => "The test ran into a timeout _with_ one of the aliasing models, after succeeding before.",
+            ClassificationResult::SucceedAll => "The test always succeeded. Yay.",
+            ClassificationResult::FailBoth => "The test fails on both aliasing models.",
+            ClassificationResult::OnlyTrees => "The test succeeded with Tree Borrows, but failed with Stacked Borrows. This number counts cases where TB is more permissive.",
+            ClassificationResult::OnlyStacks => "The test succeeded with Stacked Borrows, but failed with Tree Borrows. These are interesting, since they exploit SB weirdness.",
+        }
+    }
 }
 
 fn analyze(
@@ -173,7 +191,7 @@ pub async fn run(args: Args) -> Result<()> {
                         log::warn!("Test {key} is only present in some test outputs!");
                     }
                     ClassificationResult::FilteredCuriously => {
-                        log::warn!("Test {key} started succeeding after being filtered!");
+                        // log::warn!("Test {key} started succeeding after being filtered!");
                     }
                     ClassificationResult::OnlyStacks => {
                         // log::info!("Test {key} is OnlyStacks!");
@@ -203,6 +221,9 @@ pub async fn run(args: Args) -> Result<()> {
     let mut total = 0;
     for (k, v) in &count_per_category {
         println!("Category {k:?}: {v}");
+        if args.explain {
+            println!("  Explanation for {k:?}: {}", k.describe());
+        }
         total += *v;
     }
     println!(

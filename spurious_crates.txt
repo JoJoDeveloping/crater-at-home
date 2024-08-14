@@ -1,2 +1,16 @@
-cloud-storage@0.11.1
+yaml-rust2@0.8.1
+json_comments@0.2.2
 im-rc@15.1.0
+serde_bser@0.4.0
+easy-ext@1.0.2
+psutil@3.3.0
+revm-primitives@8.0.0
+watchman_client@0.9.0
+wasmer-config@0.5.0
+sendgrid@0.21.0
+byteyarn@0.5.1
+cargo-util-schemas@0.4.0
+cloud-storage@0.11.1
+cargo-options@0.7.4
+aide@0.13.4
+fat-macho@0.4.8
