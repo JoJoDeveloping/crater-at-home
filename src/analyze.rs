@@ -1,5 +1,6 @@
 use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
+use rand::RngCore;
 use roxmltree::{Document, Node};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -19,6 +20,8 @@ pub struct Args {
     no_pull: bool,
     #[clap(long, action)]
     explain: bool,
+    #[clap(long, action)]
+    show_some_without_tests: bool,
 
     folder: String,
 }
@@ -147,6 +150,7 @@ fn analyze(
 
 #[tokio::main]
 pub async fn run(args: Args) -> Result<()> {
+    let mut rng = rand::thread_rng();
     if !args.no_pull {
         git_pull(&args.folder).await?;
     }
@@ -204,6 +208,10 @@ pub async fn run(args: Args) -> Result<()> {
             }
             if hadtest {
                 crates_with_tests += 1;
+            } else {
+                if args.show_some_without_tests && rng.next_u32() % 500 == 4 {
+                    log::warn!("No tests in crate {path:?}!");
+                }
             }
         }
     }

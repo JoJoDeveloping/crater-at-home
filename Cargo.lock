@@ -717,6 +717,7 @@ dependencies = [
  "log",
  "num_cpus",
  "once_cell",
+ "rand",
  "regex",
  "roxmltree 0.20.0",
  "semver",
