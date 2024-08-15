@@ -16,17 +16,39 @@ use tokio::{
 
 #[derive(Parser, Clone)]
 pub struct Args {
-    #[clap(long, action)]
+    #[clap(long, action, help = "Do not `git pull` in the analysis folder.")]
     no_pull: bool,
-    #[clap(long, action)]
+    #[clap(
+        long,
+        action,
+        help = "Usually, all tests that timeout w/o an aliasing model are discarded. But the two aliasing model runs do not timeout, we could \"recover\" and consider them in the analysis."
+    )]
+    // That sounded like a good idea, but the it's unclear whether these would be Filtered or FailBoth if both fail. So let's not do this. It's only 200 anyway.
+    recover_timeout: bool,
+    #[clap(long, action, help = "Add explainer text to each category.")]
     explain: bool,
-    #[clap(long, action)]
+    #[clap(
+        long,
+        action,
+        help = "Many crates do not have tests. This flag will print the names some of these crates."
+    )]
     show_some_without_tests: bool,
-    #[clap(long, conflicts_with = "exclude")]
+    #[clap(
+        long,
+        conflicts_with = "exclude",
+        help = "A comma-separated (no spaces!) list of crates to consider, instead of all. Example: syn@1.0.0,foo@0.1.2"
+    )]
     only: Option<String>,
-    #[clap(long, conflicts_with = "only")]
+    #[clap(
+        long,
+        conflicts_with = "only",
+        help = "A comma-separated (no spaces!) list of crates to exclude. Format the same as --only."
+    )]
     exclude: Option<String>,
 
+    #[clap(
+        help = "The folder storing the results (usually a git repository, if not use --no-pull)."
+    )]
     folder: String,
 }
 
@@ -99,6 +121,7 @@ enum ClassificationResult {
     Filtered,
     FilteredCuriously,
     FilteredTimeout,
+    FilteredTimeoutRecoverable,
     UnfilteredTimeout,
     SucceedAll,
     FailBoth,
@@ -113,6 +136,7 @@ impl ClassificationResult {
             ClassificationResult::Filtered => "The test failed already without any aliasing model (due to e.g. foreign functions or int-to-ptr casts), we exclude it from analysis.",
             ClassificationResult::FilteredCuriously => "The test failed without any aliasing model, but it later worked _with_ an aliasing model. It is a flaky test and still excluded.",
             ClassificationResult::FilteredTimeout => "The test ran into a timeout without the aliasing model.",
+            ClassificationResult::FilteredTimeoutRecoverable => "The test ran into a timeout without the aliasing model, but it finished in time with both aliasing models. Use --recover-timeout to include them in the analysis.",
             ClassificationResult::UnfilteredTimeout => "The test ran into a timeout _with_ one of the aliasing models, after succeeding before.",
             ClassificationResult::SucceedAll => "The test always succeeded. Yay.",
             ClassificationResult::FailBoth => "The test fails on both aliasing models.",
@@ -126,6 +150,7 @@ fn analyze(
     nb_res: Option<&TestResult>,
     sb_res: Option<&TestResult>,
     tb_res: Option<&TestResult>,
+    args: &Args,
 ) -> ClassificationResult {
     let Some(nb_res) = nb_res else {
         return ClassificationResult::MissingPartially;
@@ -137,6 +162,11 @@ fn analyze(
         return ClassificationResult::MissingPartially;
     };
     match (nb_res, sb_res, tb_res) {
+        (TestResult::Timeout, TestResult::Timeout, _)
+        | (TestResult::Timeout, _, TestResult::Timeout) => ClassificationResult::FilteredTimeout,
+        (TestResult::Timeout, _, _) if !args.recover_timeout => {
+            ClassificationResult::FilteredTimeoutRecoverable
+        }
         (TestResult::Success | TestResult::Timeout, TestResult::Success, TestResult::Success) => {
             ClassificationResult::SucceedAll
         }
@@ -149,7 +179,6 @@ fn analyze(
         (TestResult::Success | TestResult::Timeout, TestResult::Failure, TestResult::Failure) => {
             ClassificationResult::FailBoth
         }
-        (TestResult::Timeout, _, _) => ClassificationResult::FilteredTimeout,
         (TestResult::Failure, a, b) => {
             if *a == TestResult::Success || *b == TestResult::Success {
                 ClassificationResult::FilteredCuriously
@@ -168,7 +197,7 @@ pub async fn run(args: Args) -> Result<()> {
     if !args.no_pull {
         git_pull(&args.folder).await?;
     }
-    let mut entries = tokio::fs::read_dir(args.folder).await?;
+    let mut entries = tokio::fs::read_dir(&args.folder).await?;
     let mut rs = HashMap::new();
     let mut to_rerun = BTreeSet::new();
     let mut count_per_category = BTreeMap::new();
@@ -180,7 +209,10 @@ pub async fn run(args: Args) -> Result<()> {
         if entry.metadata().await?.is_dir() {
             let krate_name =
                 String::from_utf8_lossy(entry.file_name().as_encoded_bytes()).to_string();
-            if !include(&krate_name) || exclude(&krate_name) {
+            if exclude(&krate_name) {
+                continue;
+            }
+            if !include(&krate_name) {
                 continue;
             }
             total_crates += 1;
@@ -204,7 +236,7 @@ pub async fn run(args: Args) -> Result<()> {
             });
             let mut hadtest = false;
             for key in keyset {
-                let ana = analyze(res_nb.get(&key), res_sb.get(&key), res_tb.get(&key));
+                let ana = analyze(res_nb.get(&key), res_sb.get(&key), res_tb.get(&key), &args);
                 match ana {
                     ClassificationResult::MissingPartially => {
                         if res_nb.len() == 0 || res_sb.len() == 0 || res_tb.len() == 0 {
@@ -235,12 +267,15 @@ pub async fn run(args: Args) -> Result<()> {
         }
     }
     // sometimes, copying the junit.xml file fails with
-    log::warn!(
-        "The following ({}) crates had spurious analysis bugs (missing junit.xml files) and need to be re-run: {:?}",
-        to_rerun.len(),
-        to_rerun
-    );
-    let newf = to_rerun.into_iter().collect::<Vec<_>>().join("\n");
+    if to_rerun.len() > 0 {
+        log::warn!(
+            "The following ({}) crates had spurious analysis bugs (missing junit.xml files) and need to be re-run: {:?}",
+            to_rerun.len(),
+            to_rerun
+        );
+    }
+    let mut newf = to_rerun.into_iter().collect::<Vec<_>>().join("\n");
+    newf.push('\n');
     File::create("spurious_crates.txt")
         .await?
         .write_all(newf.as_bytes())
