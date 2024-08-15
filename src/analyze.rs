@@ -3,7 +3,7 @@ use color_eyre::eyre::{eyre, Result};
 use rand::RngCore;
 use roxmltree::{Document, Node};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Display,
     iter::once,
     path::PathBuf,
@@ -170,7 +170,7 @@ pub async fn run(args: Args) -> Result<()> {
     }
     let mut entries = tokio::fs::read_dir(args.folder).await?;
     let mut rs = HashMap::new();
-    let mut to_rerun = HashSet::new();
+    let mut to_rerun = BTreeSet::new();
     let mut count_per_category = BTreeMap::new();
     let mut total_crates = 0;
     let mut crates_with_tests = 0;
