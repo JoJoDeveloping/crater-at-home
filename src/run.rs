@@ -43,6 +43,9 @@ pub struct Args {
     #[clap(long, action)]
     no_push: bool,
 
+    #[clap(long, action)]
+    live_log: bool,
+
     #[clap(long)]
     jobs: Option<usize>,
 
@@ -176,6 +179,11 @@ pub async fn run(args: Args) -> Result<()> {
                     }
                     if bytes_read == 0 {
                         break;
+                    }
+                    if args.live_log {
+                        let news = &output[output.len() - bytes_read..];
+                        print!("log for {}: ", krate.name);
+                        std::io::stdout().write(news).unwrap();
                     }
                 }
 

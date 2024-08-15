@@ -27,7 +27,11 @@ export RUSTDOCFLAGS=$RUSTFLAGS
 export NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1
 
 function timed {
-    timeout --kill-after=10s 1h inapty cargo +$TOOLCHAIN "$@" --target=$TARGET
+    timeout -v --kill-after=10s 1h inapty cargo +$TOOLCHAIN "$@" --target=$TARGET
+}
+
+function not_timed {
+    inapty cargo +$TOOLCHAIN "$@" --target=$TARGET
 }
 
 function run_check {
@@ -38,7 +42,7 @@ function run_miri {
     echo "Running miri, kind $KIND, target $TARGET, profile $PROFILE"
     mkdir -p $OUTPUTDIR/$KIND
     MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" timed miri test --no-run $ARGS &> /dev/null
-    MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" timed miri nextest run --hide-progress-bar --no-fail-fast -j1 --config-file=/root/.cargo/nextest.toml --profile $PROFILE $ARGS
+    MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" not_timed miri nextest run --hide-progress-bar --no-fail-fast -j1 --config-file=/root/.cargo/nextest.toml --profile $PROFILE $ARGS
     sleep 0.5 # maybe this prevents spurious file missing issues
     mv target/nextest/$PROFILE/junit.xml $OUTPUTDIR/$KIND/junit.xml
     # nextest runs one interpreter per test, so unsupported errors only terminate the test not the whole suite.
