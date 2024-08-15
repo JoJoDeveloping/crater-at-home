@@ -1,5 +1,7 @@
 use clap::Parser;
 use color_eyre::Result;
+use indicatif::MultiProgress;
+use indicatif_log_bridge::LogWrapper;
 use std::fmt;
 
 mod analyze;
@@ -28,14 +30,17 @@ fn main() -> Result<()> {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "info");
     }
-    env_logger::init();
+    let logger = env_logger::Builder::from_env(env_logger::Env::default()).build();
+    let multi = MultiProgress::new();
+
+    LogWrapper::new(multi.clone(), logger).try_init().unwrap();
     color_eyre::install()?;
 
     let args = Cli::parse();
     match args.command {
         Commands::Run(args) => run::run(args),
         Commands::Sync(args) => sync::run(args),
-        Commands::Analyze(args) => analyze::run(args),
+        Commands::Analyze(args) => analyze::run(args, multi),
     }
 }
 

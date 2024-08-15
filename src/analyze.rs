@@ -1,5 +1,6 @@
 use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::RngCore;
 use roxmltree::{Document, Node};
 use std::{
@@ -192,19 +193,46 @@ fn analyze(
 }
 
 #[tokio::main]
-pub async fn run(args: Args) -> Result<()> {
+pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
     let mut rng = rand::thread_rng();
     if !args.no_pull {
         git_pull(&args.folder).await?;
     }
+    let mut entries = tokio::fs::read_dir(&args.folder).await?;
+    let mut count1 = 0;
+    let exclude = as_list(&args.exclude, false);
+    let include = as_list(&args.only, true);
+    while let Some(entry) = entries.next_entry().await? {
+        if entry.metadata().await?.is_dir() {
+            let krate_name =
+                String::from_utf8_lossy(entry.file_name().as_encoded_bytes()).to_string();
+            if exclude(&krate_name) {
+                continue;
+            }
+            if !include(&krate_name) {
+                continue;
+            }
+            if krate_name.chars().next().unwrap() == '.' {
+                continue;
+            }
+            count1 += 1
+        }
+    }
+    let pg: ProgressBar = multi.add(ProgressBar::new(count1));
+    pg.set_message("Analyzing crates...");
+    pg.set_style(
+        ProgressStyle::with_template(
+            "{msg} {spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {percent_precise}% ({per_sec:.0}) ",
+        )
+        .unwrap()
+        .progress_chars("#>-"),
+    );
     let mut entries = tokio::fs::read_dir(&args.folder).await?;
     let mut rs = HashMap::new();
     let mut to_rerun = BTreeSet::new();
     let mut count_per_category = BTreeMap::new();
     let mut total_crates = 0;
     let mut crates_with_tests = 0;
-    let exclude = as_list(&args.exclude, false);
-    let include = as_list(&args.only, true);
     'nextcrate: while let Some(entry) = entries.next_entry().await? {
         if entry.metadata().await?.is_dir() {
             let krate_name =
@@ -215,10 +243,10 @@ pub async fn run(args: Args) -> Result<()> {
             if !include(&krate_name) {
                 continue;
             }
-            total_crates += 1;
             if krate_name.chars().next().unwrap() == '.' {
                 continue;
             }
+            total_crates += 1;
             let path = entry.path();
             //log::info!("Processing {path:?}");
             let res_nb = read_junit_file(&BorrowMode::NoBo.subtree(&path), &krate_name).await?;
@@ -241,6 +269,7 @@ pub async fn run(args: Args) -> Result<()> {
                     ClassificationResult::MissingPartially => {
                         if res_nb.len() == 0 || res_sb.len() == 0 || res_tb.len() == 0 {
                             to_rerun.insert(key.krate_name);
+                            pg.inc(1);
                             continue 'nextcrate;
                         }
                         log::warn!("Test {key} is only present in some test outputs!");
@@ -264,7 +293,12 @@ pub async fn run(args: Args) -> Result<()> {
                     log::warn!("No tests in crate {path:?}!");
                 }
             }
+            pg.inc(1);
         }
+    }
+    pg.finish_and_clear();
+    if count1 != total_crates {
+        log::error!("Number of crates changed in-between!");
     }
     // sometimes, copying the junit.xml file fails with
     if to_rerun.len() > 0 {
@@ -273,6 +307,7 @@ pub async fn run(args: Args) -> Result<()> {
             to_rerun.len(),
             to_rerun
         );
+        log::warn!("The file spurious_crates.txt has automatically been created to pass to a run.")
     }
     let mut newf = to_rerun.into_iter().collect::<Vec<_>>().join("\n");
     newf.push('\n');
@@ -291,27 +326,47 @@ pub async fn run(args: Args) -> Result<()> {
     println!(
         "Total: {total} tests from {crates_with_tests} crates, with {total_crates} tested in total (including crates without tests)"
     );
-    let cn = count_per_category
-        .get(&ClassificationResult::FilteredCuriously)
-        .copied()
-        .unwrap_or(0u32);
-    let rfn = count_per_category
-        .get(&ClassificationResult::Filtered)
-        .copied()
-        .unwrap_or(0);
-    let total_succ_fst: u32 = [
-        ClassificationResult::SucceedAll,
-        ClassificationResult::OnlyStacks,
-        ClassificationResult::OnlyTrees,
-        ClassificationResult::FailBoth,
-    ]
-    .iter()
-    .map(|x| count_per_category.get(&x).copied())
-    .map(|x| x.unwrap_or(0))
-    .sum();
-    let flaky_number = f64::from(cn) / f64::from(cn + rfn);
-    let expected_flaky_sometimes_fail = f64::from(total_succ_fst) * flaky_number;
-    println!("As a rough approximation, you can expect that {expected_flaky_sometimes_fail:.4} tests in the latter 3 categories are flaky.");
+    {
+        let total_aliasing_bugs: u32 = [
+            ClassificationResult::OnlyStacks,
+            ClassificationResult::OnlyTrees,
+            ClassificationResult::FailBoth,
+        ]
+        .iter()
+        .map(|x| count_per_category.get(&x).copied())
+        .map(|x| x.unwrap_or(0))
+        .sum();
+        let fixed_by_tb = count_per_category
+            .get(&ClassificationResult::OnlyTrees)
+            .copied()
+            .unwrap_or(0u32);
+        let percent = 100f64 * (f64::from(fixed_by_tb) / f64::from(total_aliasing_bugs));
+        println!("Tagline: Tree Borrows fixes {percent:.1}% of all aliasing bugs!!1!");
+    }
+    // // this calculation is bogus
+    // {
+    //     let cn = count_per_category
+    //         .get(&ClassificationResult::FilteredCuriously)
+    //         .copied()
+    //         .unwrap_or(0u32);
+    //     let rfn = count_per_category
+    //         .get(&ClassificationResult::Filtered)
+    //         .copied()
+    //         .unwrap_or(0);
+    //     let total_succ_fst: u32 = [
+    //         ClassificationResult::SucceedAll,
+    //         ClassificationResult::OnlyStacks,
+    //         ClassificationResult::OnlyTrees,
+    //         ClassificationResult::FailBoth,
+    //     ]
+    //     .iter()
+    //     .map(|x| count_per_category.get(&x).copied())
+    //     .map(|x| x.unwrap_or(0))
+    //     .sum();
+    //     let flaky_number = f64::from(cn) / f64::from(cn + rfn);
+    //     let expected_flaky_sometimes_fail = f64::from(total_succ_fst) * flaky_number;
+    //     println!("As a rough approximation, you can expect that {expected_flaky_sometimes_fail:.4} tests in the latter 3 categories are flaky.");
+    // }
     Ok(())
 }
 
@@ -391,7 +446,7 @@ async fn git_pull(folder: &String) -> Result<()> {
         .args(["-C", folder.as_str(), "pull", "--quiet"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()?
         .wait()
         .await?;
