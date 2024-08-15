@@ -22,6 +22,10 @@ pub struct Args {
     explain: bool,
     #[clap(long, action)]
     show_some_without_tests: bool,
+    #[clap(long, conflicts_with = "exclude")]
+    only: Option<String>,
+    #[clap(long, conflicts_with = "only")]
+    exclude: Option<String>,
 
     folder: String,
 }
@@ -56,6 +60,16 @@ enum BorrowMode {
     NoBo,
     Stacks,
     Trees,
+}
+
+fn as_list<'b>(s: &'b Option<String>, default: bool) -> impl for<'a> Fn(&'a str) -> bool {
+    let ohs: Option<HashSet<_>> = s
+        .clone()
+        .map(|x| x.split(',').map(|x| x.to_string()).collect());
+    move |s| match &ohs {
+        Option::None => default,
+        Option::Some(x) => x.contains(s),
+    }
 }
 
 impl BorrowMode {
@@ -123,6 +137,18 @@ fn analyze(
         return ClassificationResult::MissingPartially;
     };
     match (nb_res, sb_res, tb_res) {
+        (TestResult::Success | TestResult::Timeout, TestResult::Success, TestResult::Success) => {
+            ClassificationResult::SucceedAll
+        }
+        (TestResult::Success | TestResult::Timeout, TestResult::Success, TestResult::Failure) => {
+            ClassificationResult::OnlyStacks
+        }
+        (TestResult::Success | TestResult::Timeout, TestResult::Failure, TestResult::Success) => {
+            ClassificationResult::OnlyTrees
+        }
+        (TestResult::Success | TestResult::Timeout, TestResult::Failure, TestResult::Failure) => {
+            ClassificationResult::FailBoth
+        }
         (TestResult::Timeout, _, _) => ClassificationResult::FilteredTimeout,
         (TestResult::Failure, a, b) => {
             if *a == TestResult::Success || *b == TestResult::Success {
@@ -133,18 +159,6 @@ fn analyze(
         }
         (TestResult::Success, TestResult::Timeout, _)
         | (TestResult::Success, _, TestResult::Timeout) => ClassificationResult::UnfilteredTimeout,
-        (TestResult::Success, TestResult::Success, TestResult::Success) => {
-            ClassificationResult::SucceedAll
-        }
-        (TestResult::Success, TestResult::Success, TestResult::Failure) => {
-            ClassificationResult::OnlyStacks
-        }
-        (TestResult::Success, TestResult::Failure, TestResult::Success) => {
-            ClassificationResult::OnlyTrees
-        }
-        (TestResult::Success, TestResult::Failure, TestResult::Failure) => {
-            ClassificationResult::FailBoth
-        }
     }
 }
 
@@ -160,11 +174,16 @@ pub async fn run(args: Args) -> Result<()> {
     let mut count_per_category = BTreeMap::new();
     let mut total_crates = 0;
     let mut crates_with_tests = 0;
+    let exclude = as_list(&args.exclude, false);
+    let include = as_list(&args.only, true);
     'nextcrate: while let Some(entry) = entries.next_entry().await? {
         if entry.metadata().await?.is_dir() {
-            total_crates += 1;
             let krate_name =
                 String::from_utf8_lossy(entry.file_name().as_encoded_bytes()).to_string();
+            if !include(&krate_name) || exclude(&krate_name) {
+                continue;
+            }
+            total_crates += 1;
             if krate_name.chars().next().unwrap() == '.' {
                 continue;
             }
