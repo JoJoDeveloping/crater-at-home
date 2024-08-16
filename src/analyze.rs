@@ -2,6 +2,7 @@ use clap::Parser;
 use color_eyre::eyre::{eyre, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::RngCore;
+use regex::Regex;
 use roxmltree::{Document, Node};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -267,8 +268,8 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
                 let ana = analyze(res_nb.get(&key), res_sb.get(&key), res_tb.get(&key), &args);
                 match ana {
                     ClassificationResult::MissingPartially => {
+                        to_rerun.insert(key.krate_name.clone());
                         if res_nb.len() == 0 || res_sb.len() == 0 || res_tb.len() == 0 {
-                            to_rerun.insert(key.krate_name);
                             pg.inc(1);
                             continue 'nextcrate;
                         }
@@ -289,7 +290,13 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             if hadtest {
                 crates_with_tests += 1;
             } else {
-                if args.show_some_without_tests && rng.next_u32() % 500 == 4 {
+                let should_have = should_have_tests(&path).await?;
+                if should_have {
+                    to_rerun.insert(krate_name.clone());
+                    if args.show_some_without_tests {
+                        log::warn!("No tests in crate {path:?} but things suggests there are!");
+                    }
+                } else if args.show_some_without_tests && rng.next_u32() % 500 == 4 {
                     log::warn!("No tests in crate {path:?}!");
                 }
             }
@@ -340,33 +347,14 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             .get(&ClassificationResult::OnlyTrees)
             .copied()
             .unwrap_or(0u32);
+        let broken_by_tb = count_per_category
+            .get(&ClassificationResult::OnlyStacks)
+            .copied()
+            .unwrap_or(0u32);
         let percent = 100f64 * (f64::from(fixed_by_tb) / f64::from(total_aliasing_bugs));
-        println!("Tagline: Tree Borrows fixes {percent:.1}% of all aliasing bugs!!1!");
+        let percent_broken = 100f64 * (f64::from(broken_by_tb) / f64::from(total_aliasing_bugs));
+        println!("Tagline: Tree Borrows fixes {percent:.1}% of all aliasing bugs!!1! (Newly broken: {percent_broken:.3}% of aliasing bugs)");
     }
-    // // this calculation is bogus
-    // {
-    //     let cn = count_per_category
-    //         .get(&ClassificationResult::FilteredCuriously)
-    //         .copied()
-    //         .unwrap_or(0u32);
-    //     let rfn = count_per_category
-    //         .get(&ClassificationResult::Filtered)
-    //         .copied()
-    //         .unwrap_or(0);
-    //     let total_succ_fst: u32 = [
-    //         ClassificationResult::SucceedAll,
-    //         ClassificationResult::OnlyStacks,
-    //         ClassificationResult::OnlyTrees,
-    //         ClassificationResult::FailBoth,
-    //     ]
-    //     .iter()
-    //     .map(|x| count_per_category.get(&x).copied())
-    //     .map(|x| x.unwrap_or(0))
-    //     .sum();
-    //     let flaky_number = f64::from(cn) / f64::from(cn + rfn);
-    //     let expected_flaky_sometimes_fail = f64::from(total_succ_fst) * flaky_number;
-    //     println!("As a rough approximation, you can expect that {expected_flaky_sometimes_fail:.4} tests in the latter 3 categories are flaky.");
-    // }
     Ok(())
 }
 
@@ -437,6 +425,21 @@ async fn read_junit_file(
     }
 
     Ok(result)
+}
+
+async fn should_have_tests(folder: &PathBuf) -> Result<bool> {
+    let regex = Regex::new(
+        r"Starting [1-9][0-9]* test(|s) across [0-9]+ binar(y|ies) \(run ID: [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}, nextest profile: default-miri\)",
+    ).unwrap();
+    let path = folder.join("global_log.txt");
+    if !tokio::fs::try_exists(&path).await? {
+        return Err(eyre!("global_log not found in {folder:?}"));
+    }
+    let mut file = File::open(path).await?;
+    let mut vec = Vec::new();
+    file.read_to_end(&mut vec).await?;
+    let data = String::from_utf8_lossy(&vec);
+    return Ok(regex.is_match(data.as_ref()));
 }
 
 async fn git_pull(folder: &String) -> Result<()> {
