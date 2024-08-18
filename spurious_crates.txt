@@ -118,7 +118,6 @@ skia-bindings@0.75.0
 smoltcp@0.11.0
 solana-program@2.0.5
 speedy@0.8.7
-ssh-key@0.7.0-pre.1
 ssz_rs@0.9.0
 starlark@0.12.0
 statrs@0.17.1
