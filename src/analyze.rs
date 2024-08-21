@@ -460,7 +460,8 @@ async fn should_have_tests(folder: &PathBuf) -> Result<bool> {
     ).unwrap();
     let path = folder.join("global_log.txt");
     if !tokio::fs::try_exists(&path).await? {
-        return Err(eyre!("global_log not found in {folder:?}"));
+        return Ok(false);
+        // return Err(eyre!("global_log not found in {folder:?}"));
     }
     let mut file = File::open(path).await?;
     let mut vec = Vec::new();
