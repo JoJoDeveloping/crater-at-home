@@ -10,11 +10,14 @@ use std::{
     iter::once,
     path::PathBuf,
     process::Stdio,
+    sync::Arc,
 };
 use tokio::{
-    fs::File,
+    fs::{self, File},
     io::{AsyncReadExt, AsyncWriteExt},
 };
+
+use crate::{client::Client, Crate};
 
 #[derive(Parser, Clone)]
 pub struct Args {
@@ -47,6 +50,8 @@ pub struct Args {
         help = "A comma-separated (no spaces!) list of crates to exclude. Format the same as --only."
     )]
     exclude: Option<String>,
+    #[clap(long)]
+    crates: Option<usize>,
 
     #[clap(
         help = "The folder storing the results (usually a git repository, if not use --no-pull)."
@@ -203,21 +208,37 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
     let mut count1 = 0;
     let exclude = as_list(&args.exclude, false);
     let include = as_list(&args.only, true);
+    let client = Arc::new(Client::new().await?);
+    let (crates_that_should_have_run, _) = build_crate_list_discount(&args, &client).await?;
+    let mut crates_that_should_have_run: BTreeSet<_> = crates_that_should_have_run
+        .iter()
+        .map(|x| format!("{}@{}", x.name, x.version))
+        .collect();
     while let Some(entry) = entries.next_entry().await? {
         if entry.metadata().await?.is_dir() {
             let krate_name =
                 String::from_utf8_lossy(entry.file_name().as_encoded_bytes()).to_string();
+            if krate_name.chars().next().unwrap() == '.' {
+                continue;
+            }
+            if !crates_that_should_have_run.remove(&krate_name) {
+                log::warn!("Krate {krate_name} was not supposed to have run!");
+            }
             if exclude(&krate_name) {
                 continue;
             }
             if !include(&krate_name) {
                 continue;
             }
-            if krate_name.chars().next().unwrap() == '.' {
-                continue;
-            }
-            count1 += 1
+            count1 += 1;
         }
+    }
+    if crates_that_should_have_run.len() > 0 {
+        log::warn!(
+            "The following ({}) crates are yet missing: {:?}",
+            crates_that_should_have_run.len(),
+            crates_that_should_have_run
+        );
     }
     let pg: ProgressBar = multi.add(ProgressBar::new(count1));
     pg.set_message("Analyzing crates...");
@@ -314,9 +335,15 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             to_rerun.len(),
             to_rerun
         );
-        log::warn!("The file spurious_crates.txt has automatically been created to pass to a run.")
     }
-    let mut newf = to_rerun.into_iter().collect::<Vec<_>>().join("\n");
+    crates_that_should_have_run.append(&mut to_rerun);
+    if !crates_that_should_have_run.is_empty() {
+        log::warn!("The file spurious_crates.txt has automatically been created to pass to a run.");
+    }
+    let mut newf = crates_that_should_have_run
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("\n");
     newf.push('\n');
     File::create("spurious_crates.txt")
         .await?
@@ -459,4 +486,18 @@ async fn git_pull(folder: &String) -> Result<()> {
     } else {
         Err(eyre!("git pull failed!"))
     }
+}
+
+async fn build_crate_list_discount(args: &Args, client: &Client) -> Result<(Vec<Crate>, bool)> {
+    let mut rebuild_all = false;
+    let all_crates = client.get_crate_versions().await?;
+    let crates = if let Some(crate_count) = args.crates {
+        let mut crates = all_crates;
+        crates.truncate(crate_count);
+
+        crates
+    } else {
+        all_crates
+    };
+    Ok((crates, rebuild_all))
 }
