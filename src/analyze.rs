@@ -209,7 +209,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
     let exclude = as_list(&args.exclude, false);
     let include = as_list(&args.only, true);
     let client = Arc::new(Client::new().await?);
-    let (crates_that_should_have_run, _) = build_crate_list_discount(&args, &client).await?;
+    let crates_that_should_have_run = build_crate_list_discount(&args, &client).await?;
     let mut crates_that_should_have_run: BTreeSet<_> = crates_that_should_have_run
         .iter()
         .map(|x| format!("{}@{}", x.name, x.version))
@@ -488,8 +488,7 @@ async fn git_pull(folder: &String) -> Result<()> {
     }
 }
 
-async fn build_crate_list_discount(args: &Args, client: &Client) -> Result<(Vec<Crate>, bool)> {
-    let mut rebuild_all = false;
+async fn build_crate_list_discount(args: &Args, client: &Client) -> Result<Vec<Crate>> {
     let all_crates = client.get_crate_versions().await?;
     let crates = if let Some(crate_count) = args.crates {
         let mut crates = all_crates;
@@ -499,5 +498,5 @@ async fn build_crate_list_discount(args: &Args, client: &Client) -> Result<(Vec<
     } else {
         all_crates
     };
-    Ok((crates, rebuild_all))
+    Ok(crates)
 }

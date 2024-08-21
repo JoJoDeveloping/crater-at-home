@@ -181,9 +181,10 @@ pub async fn run(args: Args) -> Result<()> {
                         break;
                     }
                     if args.live_log {
-                        let news = &output[output.len() - bytes_read..];
-                        print!("log for {}: ", krate.name);
-                        std::io::stdout().write(news).unwrap();
+                        // strip off last \n
+                        let news = &output[output.len() - bytes_read..output.len() - 2];
+                        let news = String::from_utf8_lossy(news);
+                        log::info!("log for {}: {}", krate.name, news);
                     }
                 }
 
