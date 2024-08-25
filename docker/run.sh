@@ -41,7 +41,7 @@ function run_check {
 function run_miri {
     echo "Running miri, kind $KIND, target $TARGET, profile $PROFILE"
     mkdir -p $OUTPUTDIR/$KIND
-    MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" not_timed miri nextest run --hide-progress-bar --no-fail-fast -j8 --config-file=/root/.cargo/nextest.toml --profile $PROFILE $ARGS
+    MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" not_timed miri nextest run --hide-progress-bar --no-fail-fast -j1 --config-file=/root/.cargo/nextest.toml --profile $PROFILE $ARGS
     mv target/nextest/$PROFILE/junit.xml $OUTPUTDIR/$KIND/junit.xml
 }
 
