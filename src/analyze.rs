@@ -10,10 +10,11 @@ use std::{
     iter::once,
     path::PathBuf,
     process::Stdio,
+    str::FromStr,
     sync::Arc,
 };
 use tokio::{
-    fs::{self, File},
+    fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
 };
 
@@ -60,10 +61,17 @@ pub struct Args {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TestResult {
+enum TestResultKind {
     Success,
     Failure,
     Timeout,
+}
+
+#[derive(Clone)]
+struct TestResult {
+    kind: TestResultKind,
+    stdout: String,
+    stderr: String,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -123,6 +131,13 @@ impl BorrowMode {
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
+enum FurtherClassificationResult {
+    UndefinedBehavior,
+    RustcStackOverflow,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
 enum ClassificationResult {
     MissingPartially,
     Filtered,
@@ -131,9 +146,12 @@ enum ClassificationResult {
     FilteredTimeoutRecoverable,
     UnfilteredTimeout,
     SucceedAll,
-    FailBoth,
-    OnlyTrees,
-    OnlyStacks,
+    FailBoth {
+        sb: FurtherClassificationResult,
+        tb: FurtherClassificationResult,
+    },
+    FailSbOnly(FurtherClassificationResult),
+    FailTbOnly(FurtherClassificationResult),
 }
 
 impl ClassificationResult {
@@ -146,10 +164,22 @@ impl ClassificationResult {
             ClassificationResult::FilteredTimeoutRecoverable => "The test ran into a timeout without the aliasing model, but it finished in time with both aliasing models. Use --recover-timeout to include them in the analysis.",
             ClassificationResult::UnfilteredTimeout => "The test ran into a timeout _with_ one of the aliasing models, after succeeding before.",
             ClassificationResult::SucceedAll => "The test always succeeded. Yay.",
-            ClassificationResult::FailBoth => "The test fails on both aliasing models.",
-            ClassificationResult::OnlyTrees => "The test succeeded with Tree Borrows, but failed with Stacked Borrows. This number counts cases where TB is more permissive.",
-            ClassificationResult::OnlyStacks => "The test succeeded with Stacked Borrows, but failed with Tree Borrows. These are interesting, since they exploit SB weirdness.",
+            ClassificationResult::FailBoth{..} => "The test fails on both aliasing models.",
+            ClassificationResult::FailSbOnly(_) => "The test succeeded with Tree Borrows, but failed with Stacked Borrows. This number counts cases where TB is more permissive.",
+            ClassificationResult::FailTbOnly(_) => "The test succeeded with Stacked Borrows, but failed with Tree Borrows. These are interesting, since they exploit SB weirdness.",
         }
+    }
+}
+
+fn analyze_further(result: &TestResult) -> FurtherClassificationResult {
+    if result.stderr.contains("help: this indicates a potential bug in the program: it performed an invalid operation, but the Tree Borrows rules it violated are still experimental") {
+        return FurtherClassificationResult::UndefinedBehavior;
+    } else if result.stderr.contains("help: this indicates a potential bug in the program: it performed an invalid operation, but the Stacked Borrows rules it violated are still experimental") {
+        return FurtherClassificationResult::UndefinedBehavior;
+    } else if result.stderr.contains("thread 'rustc' has overflowed its stack\nfatal runtime error: stack overflow") {
+        return FurtherClassificationResult::RustcStackOverflow;
+    } else {
+        return FurtherClassificationResult::Unknown;
     }
 }
 
@@ -168,33 +198,48 @@ fn analyze(
     let Some(tb_res) = tb_res else {
         return ClassificationResult::MissingPartially;
     };
-    match (nb_res, sb_res, tb_res) {
-        (TestResult::Timeout, TestResult::Timeout, _)
-        | (TestResult::Timeout, _, TestResult::Timeout) => ClassificationResult::FilteredTimeout,
-        (TestResult::Timeout, _, _) if !args.recover_timeout => {
+    match (nb_res.kind, sb_res.kind, tb_res.kind) {
+        (TestResultKind::Timeout, TestResultKind::Timeout, _)
+        | (TestResultKind::Timeout, _, TestResultKind::Timeout) => {
+            ClassificationResult::FilteredTimeout
+        }
+        (TestResultKind::Timeout, _, _) if !args.recover_timeout => {
             ClassificationResult::FilteredTimeoutRecoverable
         }
-        (TestResult::Success | TestResult::Timeout, TestResult::Success, TestResult::Success) => {
-            ClassificationResult::SucceedAll
-        }
-        (TestResult::Success | TestResult::Timeout, TestResult::Success, TestResult::Failure) => {
-            ClassificationResult::OnlyStacks
-        }
-        (TestResult::Success | TestResult::Timeout, TestResult::Failure, TestResult::Success) => {
-            ClassificationResult::OnlyTrees
-        }
-        (TestResult::Success | TestResult::Timeout, TestResult::Failure, TestResult::Failure) => {
-            ClassificationResult::FailBoth
-        }
-        (TestResult::Failure, a, b) => {
-            if *a == TestResult::Success || *b == TestResult::Success {
+        (
+            TestResultKind::Success | TestResultKind::Timeout,
+            TestResultKind::Success,
+            TestResultKind::Success,
+        ) => ClassificationResult::SucceedAll,
+        (
+            TestResultKind::Success | TestResultKind::Timeout,
+            TestResultKind::Success,
+            TestResultKind::Failure,
+        ) => ClassificationResult::FailTbOnly(analyze_further(tb_res)),
+        (
+            TestResultKind::Success | TestResultKind::Timeout,
+            TestResultKind::Failure,
+            TestResultKind::Success,
+        ) => ClassificationResult::FailSbOnly(analyze_further(sb_res)),
+        (
+            TestResultKind::Success | TestResultKind::Timeout,
+            TestResultKind::Failure,
+            TestResultKind::Failure,
+        ) => ClassificationResult::FailBoth {
+            sb: analyze_further(sb_res),
+            tb: analyze_further(tb_res),
+        },
+        (TestResultKind::Failure, a, b) => {
+            if a == TestResultKind::Success || b == TestResultKind::Success {
                 ClassificationResult::FilteredCuriously
             } else {
                 ClassificationResult::Filtered
             }
         }
-        (TestResult::Success, TestResult::Timeout, _)
-        | (TestResult::Success, _, TestResult::Timeout) => ClassificationResult::UnfilteredTimeout,
+        (TestResultKind::Success, TestResultKind::Timeout, _)
+        | (TestResultKind::Success, _, TestResultKind::Timeout) => {
+            ClassificationResult::UnfilteredTimeout
+        }
     }
 }
 
@@ -255,6 +300,8 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
     let mut count_per_category = BTreeMap::new();
     let mut total_crates = 0;
     let mut crates_with_tests = 0;
+    let ana_data_path = &PathBuf::from_str("./analysis_results")?;
+    tokio::fs::create_dir_all(ana_data_path).await?;
     'nextcrate: while let Some(entry) = entries.next_entry().await? {
         if entry.metadata().await?.is_dir() {
             let krate_name =
@@ -270,7 +317,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             }
             total_crates += 1;
             let path = entry.path();
-            //log::info!("Processing {path:?}");
+            // log::info!("Processing {path:?}");
             let res_nb = read_junit_file(&BorrowMode::NoBo.subtree(&path), &krate_name).await?;
             let res_sb = read_junit_file(&BorrowMode::Stacks.subtree(&path), &krate_name).await?;
             let res_tb = read_junit_file(&BorrowMode::Trees.subtree(&path), &krate_name).await?;
@@ -299,8 +346,21 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
                     ClassificationResult::FilteredCuriously => {
                         // log::warn!("Test {key} started succeeding after being filtered!");
                     }
-                    ClassificationResult::OnlyStacks => {
-                        // log::info!("Test {key} is OnlyStacks!");
+                    ClassificationResult::FailTbOnly(k) => {
+                        let sb_res = res_tb.get(&key).unwrap();
+                        let path = ana_data_path.join(
+                            format!(
+                                "{k:?}+{}+{}+{}+{}",
+                                key.krate_name, key.testsuites_name, key.classname, key.testname
+                            )
+                            .replace("/", ":"),
+                        );
+                        let mut file = tokio::fs::File::create(path).await?;
+                        file.write_all(b"STDOUT: ###################\n").await?;
+                        file.write_all(&sb_res.stdout.as_bytes()).await?;
+                        file.write_all(b"STDERR: ###################\n").await?;
+                        file.write_all(&sb_res.stderr.as_bytes()).await?;
+                        drop(file);
                     }
                     _ => {}
                 }
@@ -362,20 +422,27 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
     );
     {
         let total_aliasing_bugs: u32 = [
-            ClassificationResult::OnlyStacks,
-            ClassificationResult::OnlyTrees,
-            ClassificationResult::FailBoth,
+            ClassificationResult::FailTbOnly(FurtherClassificationResult::UndefinedBehavior),
+            ClassificationResult::FailSbOnly(FurtherClassificationResult::UndefinedBehavior),
+            ClassificationResult::FailBoth {
+                sb: FurtherClassificationResult::UndefinedBehavior,
+                tb: FurtherClassificationResult::UndefinedBehavior,
+            },
         ]
         .iter()
         .map(|x| count_per_category.get(&x).copied())
         .map(|x| x.unwrap_or(0))
         .sum();
         let fixed_by_tb = count_per_category
-            .get(&ClassificationResult::OnlyTrees)
+            .get(&ClassificationResult::FailSbOnly(
+                FurtherClassificationResult::UndefinedBehavior,
+            ))
             .copied()
             .unwrap_or(0u32);
         let broken_by_tb = count_per_category
-            .get(&ClassificationResult::OnlyStacks)
+            .get(&ClassificationResult::FailTbOnly(
+                FurtherClassificationResult::UndefinedBehavior,
+            ))
             .copied()
             .unwrap_or(0u32);
         let percent = 100f64 * (f64::from(fixed_by_tb) / f64::from(total_aliasing_bugs));
@@ -386,22 +453,42 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
 }
 
 fn get_test_result(i: &Node) -> TestResult {
-    let mut res = TestResult::Success;
+    let mut res = TestResultKind::Success;
+    let mut system_out = String::new();
+    let mut system_err = String::new();
     for node in i.children() {
-        if node.tag_name().name() == "failure" {
-            let typ = node
-                .attribute("type")
-                .unwrap_or_else(|| panic!("Weird node {node:?}"));
-            res = match typ {
-                "test failure" => TestResult::Failure,
-                "test timeout" => TestResult::Timeout,
-                x => {
-                    panic!("Unknown test result {x}")
+        match node.tag_name().name() {
+            "failure" => {
+                let typ = node
+                    .attribute("type")
+                    .unwrap_or_else(|| panic!("Weird node {node:?}"));
+                res = match typ {
+                    "test failure" => TestResultKind::Failure,
+                    "test timeout" => TestResultKind::Timeout,
+                    x => {
+                        panic!("Unknown test result {x}")
+                    }
                 }
             }
+            "system-err" => {
+                for ele in node.children() {
+                    system_err.push_str(ele.text().unwrap())
+                }
+            }
+            "system-out" => {
+                for ele in node.children() {
+                    system_out.push_str(ele.text().unwrap())
+                }
+            }
+            s if s.chars().all(char::is_whitespace) => {}
+            s => panic!("Spurious tag \"{s}\": {node:?}"),
         }
     }
-    res
+    TestResult {
+        kind: res,
+        stdout: system_out,
+        stderr: system_err,
+    }
 }
 
 async fn read_junit_file(

@@ -10,7 +10,7 @@ then
     tar xf /cache.tar.gz
 fi
 
-TOOLCHAIN=nightly
+TOOLCHAIN=miri
 
 export CARGO_INCREMENTAL=0
 export RUST_BACKTRACE=1
@@ -41,16 +41,14 @@ function run_check {
 function run_miri {
     echo "Running miri, kind $KIND, target $TARGET, profile $PROFILE"
     mkdir -p $OUTPUTDIR/$KIND
-    MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" timed miri test --no-run $ARGS &> /dev/null
-    MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" not_timed miri nextest run --hide-progress-bar --no-fail-fast -j1 --config-file=/root/.cargo/nextest.toml --profile $PROFILE $ARGS
-    sleep 0.5 # maybe this prevents spurious file missing issues
+    MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS" not_timed miri nextest run --hide-progress-bar --no-fail-fast -j8 --config-file=/root/.cargo/nextest.toml --profile $PROFILE $ARGS
     mv target/nextest/$PROFILE/junit.xml $OUTPUTDIR/$KIND/junit.xml
-    # nextest runs one interpreter per test, so unsupported errors only terminate the test not the whole suite.
-    # But we need to panic on unsupported for doctests, because nextest doesn't support doctests.
-    MIRIFLAGS="$MIRIFLAGS $EXTRAMIRIFLAGS -Zmiri-panic-on-unsupported" timed miri test --doc --no-fail-fast $ARGS 2>&1 | tee $OUTPUTDIR/$KIND/doctest.out
 }
 
 function run_miri_thrice {
+    MIRIFLAGS="$MIRIFLAGS" timed miri test --no-run $ARGS &> /dev/null
+    # print miri version (hopefully?)
+    MIRIFLAGS="-Zmiri-version" timed miri run
     KIND=noborrows EXTRAMIRIFLAGS="-Zmiri-disable-stacked-borrows" PROFILE="default-miri" run_miri
     KIND=stackedborrows EXTRAMIRIFLAGS="" PROFILE="slow-miri" run_miri
     KIND=treeborrows EXTRAMIRIFLAGS="-Zmiri-tree-borrows" PROFILE="slow-miri" run_miri

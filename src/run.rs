@@ -4,13 +4,12 @@ use color_eyre::eyre::{eyre, Result};
 use once_cell::sync::Lazy;
 use std::{
     collections::HashMap,
-    fs::{self, File},
-    io::Write,
     process::Stdio,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::{
+    fs::{self, File},
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::Semaphore,
     task::JoinSet,
@@ -64,7 +63,7 @@ async fn build_crate_list(args: &Args, client: &Client) -> Result<(Vec<Crate>, b
     let mut rebuild_all = false;
     let all_crates = client.get_crate_versions().await?;
     let crates = if let Some(crate_list) = &args.crate_list {
-        let crate_list = fs::read_to_string(crate_list).unwrap();
+        let crate_list = tokio::fs::read_to_string(crate_list).await.unwrap();
         let all_crates: HashMap<String, Crate> = all_crates
             .into_iter()
             .map(|c| (c.name.clone(), c))
@@ -247,8 +246,8 @@ async fn save_and_push_logs(
     args: &Args,
 ) -> Result<()> {
     let crate_base = format!("{}@{}", krate.name, krate.version);
-    let mut file = File::create(format!("output/{crate_base}/global_log.txt"))?;
-    file.write_all(output)?;
+    let mut file = File::create(format!("output/{crate_base}/global_log.txt")).await?;
+    file.write_all(output).await?;
     drop(file);
     let lock = mutex.acquire().await?;
     let mut git_add = tokio::process::Command::new("git");
@@ -286,6 +285,7 @@ async fn save_and_push_logs(
         .await?;
     drop(lock);
     git_push(mutex, lastpush, false, &args).await?;
+    fs::remove_dir_all(format!("output/{crate_base}/")).await?;
     Ok(())
 }
 
