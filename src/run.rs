@@ -4,6 +4,7 @@ use color_eyre::eyre::{eyre, Result};
 use once_cell::sync::Lazy;
 use std::{
     collections::HashMap,
+    path,
     process::Stdio,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -50,6 +51,9 @@ pub struct Args {
 
     #[clap(long)]
     rev: bool,
+
+    #[clap(long, default_value = "output")]
+    output_dir: String,
 
     #[clap(
         long,
@@ -109,7 +113,7 @@ pub async fn run(args: Args) -> Result<()> {
     color_eyre::eyre::ensure!(status.success(), "docker image build failed!");
 
     log::info!("Figuring out what crates have a build log already");
-    let client = Arc::new(Client::new().await?);
+    let client = Arc::new(Client::new(args.output_dir.clone()).await?);
     let (mut crates, rebuild_all) = build_crate_list(&args, &client).await?;
     let total = crates.len();
 
@@ -149,7 +153,11 @@ pub async fn run(args: Args) -> Result<()> {
                     continue;
                 }
 
-                if !rebuild_all && git_check_crate_committed(&git_mutex, &krate).await.unwrap() {
+                if !rebuild_all
+                    && git_check_crate_committed(&git_mutex, &krate, &args)
+                        .await
+                        .unwrap()
+                {
                     log::info!(
                         "Skipping {} {} as it is already committed",
                         krate.name,
@@ -246,13 +254,18 @@ async fn save_and_push_logs(
     args: &Args,
 ) -> Result<()> {
     let crate_base = format!("{}@{}", krate.name, krate.version);
-    let mut file = File::create(format!("output/{crate_base}/global_log.txt")).await?;
+    let mut file = File::create(format!("{}/{crate_base}/global_log.txt", args.output_dir)).await?;
     file.write_all(output).await?;
     drop(file);
     let lock = mutex.acquire().await?;
     let mut git_add = tokio::process::Command::new("git");
     git_add
-        .args(["-C", "output/", "add", crate_base.as_str()])
+        .args([
+            "-C",
+            format!("{}/", args.output_dir).as_ref(),
+            "add",
+            crate_base.as_str(),
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -263,7 +276,7 @@ async fn save_and_push_logs(
     git_commit
         .args([
             "-C",
-            "output/",
+            format!("{}/", args.output_dir).as_ref(),
             "commit",
             "--quiet",
             "--only",
@@ -285,7 +298,7 @@ async fn save_and_push_logs(
         .await?;
     drop(lock);
     git_push(mutex, lastpush, false, &args).await?;
-    fs::remove_dir_all(format!("output/{crate_base}/")).await?;
+    fs::remove_dir_all(format!("{}/{crate_base}/", args.output_dir)).await?;
     Ok(())
 }
 
@@ -318,7 +331,7 @@ async fn git_push(
     } else {
         let mut git_push = tokio::process::Command::new("git");
         git_push
-            .args(["-C", "output/", "push"])
+            .args(["-C", format!("{}/", args.output_dir).as_ref(), "push"])
             .stdin(Stdio::piped())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -330,14 +343,18 @@ async fn git_push(
     Ok(())
 }
 
-async fn git_check_crate_committed(mutex: &Arc<Semaphore>, krate: &Crate) -> Result<bool> {
+async fn git_check_crate_committed(
+    mutex: &Arc<Semaphore>,
+    krate: &Crate,
+    args: &Args,
+) -> Result<bool> {
     let crate_base = format!("{}@{}", krate.name, krate.version);
     let lock = mutex.acquire().await?;
     let mut git_add = tokio::process::Command::new("git");
     let status = git_add
         .args([
             "-C",
-            "output/",
+            format!("{}/", args.output_dir).as_ref(),
             "ls-files",
             "--error-unmatch",
             format!("{}/global_log.txt", crate_base.as_str()).as_str(),
@@ -373,12 +390,12 @@ fn spawn_worker(args: &Args, cpu: usize) -> tokio::process::Child {
         // The directory we are building in (not just its target dir!) is all writable
         format!(
             "--mount=type=bind,source={},target=/output",
-            std::env::current_dir()
-                .unwrap()
-                .join("output")
-                .as_os_str()
-                .to_str()
-                .unwrap()
+            String::from_utf8_lossy(
+                path::absolute(args.output_dir.as_str())
+                    .unwrap()
+                    .as_os_str()
+                    .as_encoded_bytes()
+            )
         )
         .as_str(),
         // rustdoc tries to write to and executes files in /tmp, odd move but whatever

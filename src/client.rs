@@ -8,27 +8,29 @@ use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Clone)]
-pub struct Client {}
-
-fn mkpath(key: &str) -> PathBuf {
-    let pp = Path::new("output").join(key);
-    std::fs::create_dir_all(pp.parent().unwrap()).unwrap();
-    pp
+pub struct Client {
+    output_dir: String,
 }
 
 impl Client {
-    pub async fn new() -> Result<Self> {
-        Ok(Self {})
+    pub async fn new(output_dir: String) -> Result<Self> {
+        Ok(Self { output_dir })
+    }
+
+    fn mkpath(&self, key: &str) -> PathBuf {
+        let pp = Path::new(&self.output_dir).join(key);
+        std::fs::create_dir_all(pp.parent().unwrap()).unwrap();
+        pp
     }
 
     pub fn write_persistent(&self, key: &str, data: &[u8]) -> Result<()> {
-        let mut file = File::create(mkpath(key))?;
+        let mut file = File::create(self.mkpath(key))?;
         file.write_all(data)?;
         Ok(())
     }
 
     pub fn read_persistent(&self, key: &str) -> Result<Vec<u8>> {
-        let mut file = File::open(mkpath(key))?;
+        let mut file = File::open(self.mkpath(key))?;
         let mut buf = Vec::new();
         let _res = file.read_to_end(&mut buf)?;
         Ok(buf)

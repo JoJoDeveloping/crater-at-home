@@ -8,7 +8,7 @@ pub struct Args {}
 
 #[tokio::main]
 pub async fn run(_args: Args) -> Result<()> {
-    let client = Arc::new(Client::new().await?);
+    let client = Arc::new(Client::new("output".into()).await?);
 
     log::info!("Updating the cached crates.io database dump");
     let (crates, data) = db_dump::download()?;
