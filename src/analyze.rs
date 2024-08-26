@@ -51,8 +51,25 @@ pub struct Args {
         help = "A comma-separated (no spaces!) list of crates to exclude. Format the same as --only."
     )]
     exclude: Option<String>,
-    #[clap(long)]
+    #[clap(
+        long,
+        conflicts_with = "partial",
+        help = "Number of crates originally supposed to run, to identify missing crates"
+    )]
     crates: Option<usize>,
+    #[clap(
+        long,
+        action,
+        help = "For looking at a partial run, does not try to find missing crates."
+    )]
+    partial: bool,
+
+    #[clap(
+        long,
+        help = "The folder to store detailed extracts in.",
+        default_value = "./analysis_results"
+    )]
+    analysis_results_folder: String,
 
     #[clap(
         help = "The folder storing the results (usually a git repository, if not use --no-pull)."
@@ -134,6 +151,7 @@ impl BorrowMode {
 enum FurtherClassificationResult {
     UndefinedBehavior,
     RustcStackOverflow,
+    UnsupportedOperation,
     Unknown,
 }
 
@@ -178,6 +196,8 @@ fn analyze_further(result: &TestResult) -> FurtherClassificationResult {
         return FurtherClassificationResult::UndefinedBehavior;
     } else if result.stderr.contains("thread 'rustc' has overflowed its stack\nfatal runtime error: stack overflow") {
         return FurtherClassificationResult::RustcStackOverflow;
+    } else if result.stderr.contains("error: unsupported operation: ") {
+        return FurtherClassificationResult::UnsupportedOperation;
     } else {
         return FurtherClassificationResult::Unknown;
     }
@@ -266,7 +286,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             if krate_name.chars().next().unwrap() == '.' {
                 continue;
             }
-            if !crates_that_should_have_run.remove(&krate_name) {
+            if !args.partial && !crates_that_should_have_run.remove(&krate_name) {
                 log::warn!("Krate {krate_name} was not supposed to have run!");
             }
             if exclude(&krate_name) {
@@ -286,7 +306,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
         );
     }
     let pg: ProgressBar = multi.add(ProgressBar::new(count1));
-    pg.set_message("Analyzing crates...");
+    pg.set_message(format!("Analyzing {count1} crates"));
     pg.set_style(
         ProgressStyle::with_template(
             "{msg} {spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {percent_precise}% ({per_sec:.0}) ",
@@ -300,7 +320,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
     let mut count_per_category = BTreeMap::new();
     let mut total_crates = 0;
     let mut crates_with_tests = 0;
-    let ana_data_path = &PathBuf::from_str("./analysis_results")?;
+    let ana_data_path = &PathBuf::from_str(&args.analysis_results_folder)?;
     tokio::fs::create_dir_all(ana_data_path).await?;
     'nextcrate: while let Some(entry) = entries.next_entry().await? {
         if entry.metadata().await?.is_dir() {
@@ -577,6 +597,9 @@ async fn git_pull(folder: &String) -> Result<()> {
 }
 
 async fn build_crate_list_discount(args: &Args, client: &Client) -> Result<Vec<Crate>> {
+    if args.partial {
+        return Ok(vec![]);
+    }
     let all_crates = client.get_crate_versions().await?;
     let crates = if let Some(crate_count) = args.crates {
         let mut crates = all_crates;
