@@ -366,6 +366,12 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
                     ClassificationResult::FilteredCuriously => {
                         // log::warn!("Test {key} started succeeding after being filtered!");
                     }
+                    ClassificationResult::FailBoth { sb, tb } if tb != sb => {
+                        to_rerun.insert(key.krate_name.clone());
+                        log::warn!(
+                            "Test {key} behaved incongruent on TB ({tb:?}) and SB ({sb:?})!"
+                        );
+                    }
                     ClassificationResult::FailTbOnly(k) => {
                         let sb_res = res_tb.get(&key).unwrap();
                         let path = ana_data_path.join(
@@ -441,18 +447,10 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
         "Total: {total} tests from {crates_with_tests} crates, with {total_crates} tested in total (including crates without tests)"
     );
     {
-        let total_aliasing_bugs: u32 = [
-            ClassificationResult::FailTbOnly(FurtherClassificationResult::UndefinedBehavior),
-            ClassificationResult::FailSbOnly(FurtherClassificationResult::UndefinedBehavior),
-            ClassificationResult::FailBoth {
-                sb: FurtherClassificationResult::UndefinedBehavior,
-                tb: FurtherClassificationResult::UndefinedBehavior,
-            },
-        ]
-        .iter()
-        .map(|x| count_per_category.get(&x).copied())
-        .map(|x| x.unwrap_or(0))
-        .sum();
+        let total_aliasing_bugs: u32 = count_per_category
+            .iter()
+            .filter_map(|(k, v)| if is_aliasing_bug(*k) { Some(*v) } else { None })
+            .sum();
         let fixed_by_tb = count_per_category
             .get(&ClassificationResult::FailSbOnly(
                 FurtherClassificationResult::UndefinedBehavior,
@@ -610,4 +608,21 @@ async fn build_crate_list_discount(args: &Args, client: &Client) -> Result<Vec<C
         all_crates
     };
     Ok(crates)
+}
+
+fn is_aliasing_bug(x: ClassificationResult) -> bool {
+    match x {
+        ClassificationResult::FailBoth {
+            sb: FurtherClassificationResult::UndefinedBehavior,
+            ..
+        } => true,
+        ClassificationResult::FailBoth {
+            tb: FurtherClassificationResult::UndefinedBehavior,
+            ..
+        } => true,
+        ClassificationResult::FailTbOnly(FurtherClassificationResult::UndefinedBehavior) => true,
+        ClassificationResult::FailSbOnly(FurtherClassificationResult::UndefinedBehavior) => true,
+        ClassificationResult::SucceedAll => false,
+        _ => false,
+    }
 }

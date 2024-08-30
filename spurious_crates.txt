@@ -1,0 +1,12 @@
+amethyst_network@0.15.3
+cryptoxide@0.4.4
+dahl-salso@0.6.6
+deno_doc@0.146.0
+desync@0.8.2
+ipc-queue@0.3.0
+laurel@0.6.2
+raui-core@0.63.0
+termcolor_output@1.0.1
+toolshed@0.8.1
+tract-linalg@0.21.6
+uneval@0.2.4

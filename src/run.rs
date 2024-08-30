@@ -254,6 +254,8 @@ async fn save_and_push_logs(
     args: &Args,
 ) -> Result<()> {
     let crate_base = format!("{}@{}", krate.name, krate.version);
+    let base_crate_dir = format!("{}/{crate_base}/", args.output_dir);
+    tokio::fs::create_dir_all(base_crate_dir).await?;
     let mut file = File::create(format!("{}/{crate_base}/global_log.txt", args.output_dir)).await?;
     file.write_all(output).await?;
     drop(file);
