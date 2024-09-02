@@ -320,6 +320,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
     let mut count_per_category = BTreeMap::new();
     let mut total_crates = 0;
     let mut crates_with_tests = 0;
+    let mut crates_with_tb_error = BTreeSet::new();
     let ana_data_path = &PathBuf::from_str(&args.analysis_results_folder)?;
     tokio::fs::create_dir_all(ana_data_path).await?;
     'nextcrate: while let Some(entry) = entries.next_entry().await? {
@@ -373,7 +374,10 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
                         );
                     }
                     ClassificationResult::FailTbOnly(k) => {
-                        let sb_res = res_tb.get(&key).unwrap();
+                        if matches!(k, FurtherClassificationResult::UndefinedBehavior) {
+                            crates_with_tb_error.insert(key.krate_name.clone());
+                        }
+                        let tb_res = res_tb.get(&key).unwrap();
                         let path = ana_data_path.join(
                             format!(
                                 "{k:?}+{}+{}+{}+{}",
@@ -383,9 +387,9 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
                         );
                         let mut file = tokio::fs::File::create(path).await?;
                         file.write_all(b"STDOUT: ###################\n").await?;
-                        file.write_all(&sb_res.stdout.as_bytes()).await?;
+                        file.write_all(&tb_res.stdout.as_bytes()).await?;
                         file.write_all(b"STDERR: ###################\n").await?;
-                        file.write_all(&sb_res.stderr.as_bytes()).await?;
+                        file.write_all(&tb_res.stderr.as_bytes()).await?;
                         drop(file);
                     }
                     _ => {}
@@ -465,7 +469,8 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             .unwrap_or(0u32);
         let percent = 100f64 * (f64::from(fixed_by_tb) / f64::from(total_aliasing_bugs));
         let percent_broken = 100f64 * (f64::from(broken_by_tb) / f64::from(total_aliasing_bugs));
-        println!("Tagline: Tree Borrows fixes {percent:.1}% of all aliasing bugs!!1! (Newly broken: {percent_broken:.3}% of aliasing bugs)");
+        println!("Tagline: Tree Borrows fixes {percent:.1}% of all aliasing bugs!!1! (Newly broken: {percent_broken:.3}% of aliasing bugs, found across only {} crates)", crates_with_tb_error.len());
+        println!("  These crates are: {crates_with_tb_error:?}");
     }
     Ok(())
 }
