@@ -87,6 +87,8 @@ enum TestResultKind {
 #[derive(Clone)]
 struct TestResult {
     kind: TestResultKind,
+
+    #[allow(unused)]
     stdout: String,
     stderr: String,
 }
@@ -173,6 +175,7 @@ enum ClassificationResult {
 }
 
 impl ClassificationResult {
+    #[allow(unused)]
     pub fn describe(self) -> &'static str {
         match self {
             ClassificationResult::MissingPartially => "The test did not exist in some miri modes. This should not happen.",
@@ -189,6 +192,41 @@ impl ClassificationResult {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RalfResult {
+    Success,
+    Timeout,
+    ErrorUnknown,
+    ErrorUnsupportedOperation(String),
+    ErrorUnsupportedOperationStrictProvenance,
+    ErrorUndefinedBehavior(String),
+}
+
+fn alayze_special_ralf(result: &TestResult) -> RalfResult {
+    match &result.kind {
+        TestResultKind::Success => RalfResult::Success,
+        TestResultKind::Failure => {
+            if result.stderr.contains("error: unsupported operation: ") {
+                if result.stderr.contains("error: unsupported operation: integer-to-pointer casts and `ptr::with_exposed_provenance` are not supported with `-Zmiri-strict-provenance`") {
+                    RalfResult::ErrorUnsupportedOperationStrictProvenance
+                } else {
+                    let re = Regex::new(r"error: unsupported operation: (?<cause>(can't call foreign function `.*` on OS `.*`|extern static `.*` is not supported by Miri|can't execute syscall with ID [0-9]*|.{0,20}))").unwrap();
+                    let caps = re.captures(&result.stderr).unwrap();
+                    RalfResult::ErrorUnsupportedOperation(caps["cause"].to_string())
+                }
+            } else if result.stderr.contains("error: Undefined Behavior: ") {
+                let re = Regex::new(r"error: Undefined Behavior: (?<cause>.{0,20})").unwrap();
+                let caps = re.captures(&result.stderr).unwrap();
+                RalfResult::ErrorUndefinedBehavior(caps["cause"].to_string())
+            } else {
+                RalfResult::ErrorUnknown
+            }
+        }
+        TestResultKind::Timeout => RalfResult::Timeout,
+    }
+}
+
+#[allow(unused)]
 fn analyze_further(result: &TestResult) -> FurtherClassificationResult {
     if result.stderr.contains("help: this indicates a potential bug in the program: it performed an invalid operation, but the Tree Borrows rules it violated are still experimental") {
         return FurtherClassificationResult::UndefinedBehavior;
@@ -203,6 +241,7 @@ fn analyze_further(result: &TestResult) -> FurtherClassificationResult {
     }
 }
 
+#[allow(unused)]
 fn analyze(
     nb_res: Option<&TestResult>,
     sb_res: Option<&TestResult>,
@@ -315,14 +354,14 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
         .progress_chars("#>-"),
     );
     let mut entries = tokio::fs::read_dir(&args.folder).await?;
-    let mut rs = HashMap::new();
     let mut to_rerun = BTreeSet::new();
     let mut count_per_category = BTreeMap::new();
     let mut total_crates = 0;
     let mut crates_with_tests = 0;
-    let mut crates_with_tb_error = BTreeSet::new();
     let ana_data_path = &PathBuf::from_str(&args.analysis_results_folder)?;
     tokio::fs::create_dir_all(ana_data_path).await?;
+
+    #[allow(unused)]
     'nextcrate: while let Some(entry) = entries.next_entry().await? {
         if entry.metadata().await?.is_dir() {
             let krate_name =
@@ -339,62 +378,10 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             total_crates += 1;
             let path = entry.path();
             // log::info!("Processing {path:?}");
-            let res_nb = read_junit_file(&BorrowMode::NoBo.subtree(&path), &krate_name).await?;
             let res_sb = read_junit_file(&BorrowMode::Stacks.subtree(&path), &krate_name).await?;
-            let res_tb = read_junit_file(&BorrowMode::Trees.subtree(&path), &krate_name).await?;
-            let mut keyset = HashSet::new();
-            res_nb.keys().cloned().for_each(|x| {
-                keyset.insert(x);
-            });
-            res_sb.keys().cloned().for_each(|x| {
-                keyset.insert(x);
-            });
-            res_tb.keys().cloned().for_each(|x| {
-                keyset.insert(x);
-            });
             let mut hadtest = false;
-            for key in keyset {
-                let ana = analyze(res_nb.get(&key), res_sb.get(&key), res_tb.get(&key), &args);
-                match ana {
-                    ClassificationResult::MissingPartially => {
-                        to_rerun.insert(key.krate_name.clone());
-                        if res_nb.len() == 0 || res_sb.len() == 0 || res_tb.len() == 0 {
-                            pg.inc(1);
-                            continue 'nextcrate;
-                        }
-                        log::warn!("Test {key} is only present in some test outputs!");
-                    }
-                    ClassificationResult::FilteredCuriously => {
-                        // log::warn!("Test {key} started succeeding after being filtered!");
-                    }
-                    ClassificationResult::FailBoth { sb, tb } if tb != sb => {
-                        to_rerun.insert(key.krate_name.clone());
-                        log::warn!(
-                            "Test {key} behaved incongruent on TB ({tb:?}) and SB ({sb:?})!"
-                        );
-                    }
-                    ClassificationResult::FailTbOnly(k) => {
-                        if matches!(k, FurtherClassificationResult::UndefinedBehavior) {
-                            crates_with_tb_error.insert(key.krate_name.clone());
-                        }
-                        let tb_res = res_tb.get(&key).unwrap();
-                        let path = ana_data_path.join(
-                            format!(
-                                "{k:?}+{}+{}+{}+{}",
-                                key.krate_name, key.testsuites_name, key.classname, key.testname
-                            )
-                            .replace("/", ":"),
-                        );
-                        let mut file = tokio::fs::File::create(path).await?;
-                        file.write_all(b"STDOUT: ###################\n").await?;
-                        file.write_all(&tb_res.stdout.as_bytes()).await?;
-                        file.write_all(b"STDERR: ###################\n").await?;
-                        file.write_all(&tb_res.stderr.as_bytes()).await?;
-                        drop(file);
-                    }
-                    _ => {}
-                }
-                rs.insert(key, ana);
+            for (_, value) in &res_sb {
+                let ana = alayze_special_ralf(value);
                 *count_per_category.entry(ana).or_insert(0) += 1;
                 hadtest = true;
             }
@@ -440,38 +427,15 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
         .write_all(newf.as_bytes())
         .await?;
     let mut total = 0;
-    for (k, v) in &count_per_category {
+    let mut vv = count_per_category.into_iter().collect::<Vec<_>>();
+    vv.sort_by_key(|x| x.1);
+    for (k, v) in &vv {
         println!("Category {k:?}: {v}");
-        if args.explain {
-            println!("  Explanation for {k:?}: {}", k.describe());
-        }
         total += *v;
     }
     println!(
         "Total: {total} tests from {crates_with_tests} crates, with {total_crates} tested in total (including crates without tests)"
     );
-    {
-        let total_aliasing_bugs: u32 = count_per_category
-            .iter()
-            .filter_map(|(k, v)| if is_aliasing_bug(*k) { Some(*v) } else { None })
-            .sum();
-        let fixed_by_tb = count_per_category
-            .get(&ClassificationResult::FailSbOnly(
-                FurtherClassificationResult::UndefinedBehavior,
-            ))
-            .copied()
-            .unwrap_or(0u32);
-        let broken_by_tb = count_per_category
-            .get(&ClassificationResult::FailTbOnly(
-                FurtherClassificationResult::UndefinedBehavior,
-            ))
-            .copied()
-            .unwrap_or(0u32);
-        let percent = 100f64 * (f64::from(fixed_by_tb) / f64::from(total_aliasing_bugs));
-        let percent_broken = 100f64 * (f64::from(broken_by_tb) / f64::from(total_aliasing_bugs));
-        println!("Tagline: Tree Borrows fixes {percent:.1}% of all aliasing bugs!!1! (Newly broken: {percent_broken:.3}% of aliasing bugs, found across only {} crates)", crates_with_tb_error.len());
-        println!("  These crates are: {crates_with_tb_error:?}");
-    }
     Ok(())
 }
 
@@ -613,21 +577,4 @@ async fn build_crate_list_discount(args: &Args, client: &Client) -> Result<Vec<C
         all_crates
     };
     Ok(crates)
-}
-
-fn is_aliasing_bug(x: ClassificationResult) -> bool {
-    match x {
-        ClassificationResult::FailBoth {
-            sb: FurtherClassificationResult::UndefinedBehavior,
-            ..
-        } => true,
-        ClassificationResult::FailBoth {
-            tb: FurtherClassificationResult::UndefinedBehavior,
-            ..
-        } => true,
-        ClassificationResult::FailTbOnly(FurtherClassificationResult::UndefinedBehavior) => true,
-        ClassificationResult::FailSbOnly(FurtherClassificationResult::UndefinedBehavior) => true,
-        ClassificationResult::SucceedAll => false,
-        _ => false,
-    }
 }
