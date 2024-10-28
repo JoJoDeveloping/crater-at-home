@@ -77,7 +77,7 @@ pub struct Args {
     folder: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
 enum TestResultKind {
     Success,
     Failure,
@@ -149,20 +149,28 @@ impl BorrowMode {
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
 enum FurtherClassificationResult {
-    UndefinedBehavior,
+    UndefinedBehaviorBorrow,
+    UndefinedBehaviorOther,
     RustcStackOverflow,
     UnsupportedOperation,
     Unknown,
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
+enum UnfilteredTimeoutSource {
+    TbOnly(i32),
+    SbOnly,
+    Both,
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
 enum ClassificationResult {
     MissingPartially,
-    Filtered,
-    FilteredCuriously,
+    Filtered(FurtherClassificationResult),
+    // FilteredCuriously,
     FilteredTimeout,
-    FilteredTimeoutRecoverable,
-    UnfilteredTimeout,
+    // FilteredTimeoutRecoverable,
+    UnfilteredTimeout(UnfilteredTimeoutSource),
     SucceedAll,
     FailBoth {
         sb: FurtherClassificationResult,
@@ -176,11 +184,11 @@ impl ClassificationResult {
     pub fn describe(self) -> &'static str {
         match self {
             ClassificationResult::MissingPartially => "The test did not exist in some miri modes. This should not happen.",
-            ClassificationResult::Filtered => "The test failed already without any aliasing model (due to e.g. foreign functions or int-to-ptr casts), we exclude it from analysis.",
-            ClassificationResult::FilteredCuriously => "The test failed without any aliasing model, but it later worked _with_ an aliasing model. It is a flaky test and still excluded.",
+            ClassificationResult::Filtered(_) => "The test failed already without any aliasing model (due to e.g. foreign functions or int-to-ptr casts), we exclude it from analysis.",
+            // ClassificationResult::FilteredCuriously => "The test failed without any aliasing model, but it later worked _with_ an aliasing model. It is a flaky test and still excluded.",
             ClassificationResult::FilteredTimeout => "The test ran into a timeout without the aliasing model.",
-            ClassificationResult::FilteredTimeoutRecoverable => "The test ran into a timeout without the aliasing model, but it finished in time with both aliasing models. Use --recover-timeout to include them in the analysis.",
-            ClassificationResult::UnfilteredTimeout => "The test ran into a timeout _with_ one of the aliasing models, after succeeding before.",
+            // ClassificationResult::FilteredTimeoutRecoverable => "The test ran into a timeout without the aliasing model, but it finished in time with both aliasing models. Use --recover-timeout to include them in the analysis.",
+            ClassificationResult::UnfilteredTimeout(_) => "The test ran into a timeout _with_ one of the aliasing models, after succeeding before.",
             ClassificationResult::SucceedAll => "The test always succeeded. Yay.",
             ClassificationResult::FailBoth{..} => "The test fails on both aliasing models.",
             ClassificationResult::FailSbOnly(_) => "The test succeeded with Tree Borrows, but failed with Stacked Borrows. This number counts cases where TB is more permissive.",
@@ -190,14 +198,19 @@ impl ClassificationResult {
 }
 
 fn analyze_further(result: &TestResult) -> FurtherClassificationResult {
+    let regex = Regex::new("error: Undefined Behavior: Data race detected between .* retag (read|write)( of type `.[^`]*`|) on thread").unwrap();
     if result.stderr.contains("help: this indicates a potential bug in the program: it performed an invalid operation, but the Tree Borrows rules it violated are still experimental") {
-        return FurtherClassificationResult::UndefinedBehavior;
+        return FurtherClassificationResult::UndefinedBehaviorBorrow;
     } else if result.stderr.contains("help: this indicates a potential bug in the program: it performed an invalid operation, but the Stacked Borrows rules it violated are still experimental") {
-        return FurtherClassificationResult::UndefinedBehavior;
-    } else if result.stderr.contains("thread 'rustc' has overflowed its stack\nfatal runtime error: stack overflow") {
+        return FurtherClassificationResult::UndefinedBehaviorBorrow;
+    } else if regex.is_match(&result.stderr) {
+        return FurtherClassificationResult::UndefinedBehaviorBorrow;
+    }else if result.stderr.contains("thread 'rustc' has overflowed its stack\nfatal runtime error: stack overflow") {
         return FurtherClassificationResult::RustcStackOverflow;
     } else if result.stderr.contains("error: unsupported operation: ") {
         return FurtherClassificationResult::UnsupportedOperation;
+    } else if result.stderr.contains("error: Undefined Behavior:") {
+        return FurtherClassificationResult::UndefinedBehaviorOther
     } else {
         return FurtherClassificationResult::Unknown;
     }
@@ -219,47 +232,42 @@ fn analyze(
         return ClassificationResult::MissingPartially;
     };
     match (nb_res.kind, sb_res.kind, tb_res.kind) {
-        (TestResultKind::Timeout, TestResultKind::Timeout, _)
-        | (TestResultKind::Timeout, _, TestResultKind::Timeout) => {
-            ClassificationResult::FilteredTimeout
+        (TestResultKind::Timeout, _, _) => ClassificationResult::FilteredTimeout,
+        (TestResultKind::Success, TestResultKind::Success, TestResultKind::Success) => {
+            ClassificationResult::SucceedAll
         }
-        (TestResultKind::Timeout, _, _) if !args.recover_timeout => {
-            ClassificationResult::FilteredTimeoutRecoverable
+        (TestResultKind::Success, TestResultKind::Success, TestResultKind::Failure) => {
+            ClassificationResult::FailTbOnly(analyze_further(tb_res))
         }
-        (
-            TestResultKind::Success | TestResultKind::Timeout,
-            TestResultKind::Success,
-            TestResultKind::Success,
-        ) => ClassificationResult::SucceedAll,
-        (
-            TestResultKind::Success | TestResultKind::Timeout,
-            TestResultKind::Success,
-            TestResultKind::Failure,
-        ) => ClassificationResult::FailTbOnly(analyze_further(tb_res)),
-        (
-            TestResultKind::Success | TestResultKind::Timeout,
-            TestResultKind::Failure,
-            TestResultKind::Success,
-        ) => ClassificationResult::FailSbOnly(analyze_further(sb_res)),
-        (
-            TestResultKind::Success | TestResultKind::Timeout,
-            TestResultKind::Failure,
-            TestResultKind::Failure,
-        ) => ClassificationResult::FailBoth {
-            sb: analyze_further(sb_res),
-            tb: analyze_further(tb_res),
-        },
-        (TestResultKind::Failure, a, b) => {
-            if a == TestResultKind::Success || b == TestResultKind::Success {
-                ClassificationResult::FilteredCuriously
-            } else {
-                ClassificationResult::Filtered
+        (TestResultKind::Success, TestResultKind::Failure, TestResultKind::Success) => {
+            ClassificationResult::FailSbOnly(analyze_further(sb_res))
+        }
+        (TestResultKind::Success, TestResultKind::Failure, TestResultKind::Failure) => {
+            ClassificationResult::FailBoth {
+                sb: analyze_further(sb_res),
+                tb: analyze_further(tb_res),
             }
         }
-        (TestResultKind::Success, TestResultKind::Timeout, _)
-        | (TestResultKind::Success, _, TestResultKind::Timeout) => {
-            ClassificationResult::UnfilteredTimeout
+        (TestResultKind::Failure, _a, _b) => {
+            // if a == TestResultKind::Success || b == TestResultKind::Success {
+            //     ClassificationResult::FilteredCuriously
+            // } else {
+            ClassificationResult::Filtered(analyze_further(nb_res))
+            // }
         }
+        (TestResultKind::Success, TestResultKind::Timeout, TestResultKind::Timeout) => {
+            ClassificationResult::UnfilteredTimeout(UnfilteredTimeoutSource::Both)
+        }
+        (
+            TestResultKind::Success,
+            k @ (TestResultKind::Success | TestResultKind::Failure),
+            TestResultKind::Timeout,
+        ) => ClassificationResult::UnfilteredTimeout(UnfilteredTimeoutSource::TbOnly(0)),
+        (
+            TestResultKind::Success,
+            TestResultKind::Timeout,
+            TestResultKind::Success | TestResultKind::Failure,
+        ) => ClassificationResult::UnfilteredTimeout(UnfilteredTimeoutSource::SbOnly),
     }
 }
 
@@ -354,44 +362,50 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             });
             let mut hadtest = false;
             for key in keyset {
-                let ana = analyze(res_nb.get(&key), res_sb.get(&key), res_tb.get(&key), &args);
+                let mut ana = analyze(
+                    res_nb.get(&key).map(|x| &x.1),
+                    res_sb.get(&key).map(|x| &x.1),
+                    res_tb.get(&key).map(|x| &x.1),
+                    &args,
+                );
                 match ana {
                     ClassificationResult::MissingPartially => {
-                        to_rerun.insert(key.krate_name.clone());
+                        // to_rerun.insert(key.krate_name.clone());
                         if res_nb.len() == 0 || res_sb.len() == 0 || res_tb.len() == 0 {
                             pg.inc(1);
                             continue 'nextcrate;
                         }
                         log::warn!("Test {key} is only present in some test outputs!");
                     }
-                    ClassificationResult::FilteredCuriously => {
-                        // log::warn!("Test {key} started succeeding after being filtered!");
-                    }
+                    // ClassificationResult::FilteredCuriously => {
+                    //     log::warn!("Test {key} started succeeding after being filtered!");
+                    // }
                     ClassificationResult::FailBoth { sb, tb } if tb != sb => {
-                        to_rerun.insert(key.krate_name.clone());
-                        log::warn!(
-                            "Test {key} behaved incongruent on TB ({tb:?}) and SB ({sb:?})!"
-                        );
+                        // to_rerun.insert(key.krate_name.clone());
+                        // log::warn!(
+                        //     "Test {key} behaved incongruent on TB ({tb:?}) and SB ({sb:?})!"
+                        // );
                     }
                     ClassificationResult::FailTbOnly(k) => {
-                        if matches!(k, FurtherClassificationResult::UndefinedBehavior) {
+                        if matches!(k, FurtherClassificationResult::UndefinedBehaviorBorrow) {
                             crates_with_tb_error.insert(key.krate_name.clone());
                         }
-                        let tb_res = res_tb.get(&key).unwrap();
-                        let path = ana_data_path.join(
-                            format!(
-                                "{k:?}+{}+{}+{}+{}",
-                                key.krate_name, key.testsuites_name, key.classname, key.testname
-                            )
-                            .replace("/", ":"),
-                        );
-                        let mut file = tokio::fs::File::create(path).await?;
-                        file.write_all(b"STDOUT: ###################\n").await?;
-                        file.write_all(&tb_res.stdout.as_bytes()).await?;
-                        file.write_all(b"STDERR: ###################\n").await?;
-                        file.write_all(&tb_res.stderr.as_bytes()).await?;
-                        drop(file);
+                        write_to_file(&res_tb, &key, ana_data_path, k, "TBTB").await?
                     }
+                    ClassificationResult::FailSbOnly(
+                        k @ FurtherClassificationResult::UndefinedBehaviorOther,
+                    ) => write_to_file(&res_sb, &key, ana_data_path, k, "SBSB").await?,
+                    ClassificationResult::UnfilteredTimeout(_) => {
+                        to_rerun.insert(key.krate_name.clone());
+                    }
+                    // ClassificationResult::UnfilteredTimeout(UnfilteredTimeoutSource::TbOnly(
+                    //     ref mut x,
+                    // )) => {
+                    //     *x = res_sb.get(&key).unwrap().0 as i32;
+                    //     if *x < 10 {
+                    //         log::warn!("TB very slow {x} on test {key}!")
+                    //     }
+                    // }
                     _ => {}
                 }
                 rs.insert(key, ana);
@@ -457,13 +471,13 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             .sum();
         let fixed_by_tb = count_per_category
             .get(&ClassificationResult::FailSbOnly(
-                FurtherClassificationResult::UndefinedBehavior,
+                FurtherClassificationResult::UndefinedBehaviorBorrow,
             ))
             .copied()
             .unwrap_or(0u32);
         let broken_by_tb = count_per_category
             .get(&ClassificationResult::FailTbOnly(
-                FurtherClassificationResult::UndefinedBehavior,
+                FurtherClassificationResult::UndefinedBehaviorBorrow,
             ))
             .copied()
             .unwrap_or(0u32);
@@ -517,7 +531,7 @@ fn get_test_result(i: &Node) -> TestResult {
 async fn read_junit_file(
     path: &PathBuf,
     krate_name: &String,
-) -> Result<HashMap<TestName, TestResult>> {
+) -> Result<HashMap<TestName, (f32, TestResult)>> {
     let path = path.join("junit.xml");
     if !tokio::fs::try_exists(&path).await? {
         return Ok(Default::default());
@@ -546,6 +560,8 @@ async fn read_junit_file(
                 let name = test.attribute("name").unwrap();
                 let classname = test.attribute("classname").unwrap();
                 assert_eq!(classname, testsuite_name);
+                let runtime = test.attribute("time").unwrap();
+                let runtime = f32::from_str(runtime).unwrap();
                 let tr = get_test_result(&test);
                 let testname = TestName {
                     krate_name: krate_name.clone(),
@@ -553,7 +569,7 @@ async fn read_junit_file(
                     classname: classname.to_string(),
                     testname: name.to_string(),
                 };
-                let hi = result.insert(testname.clone(), tr);
+                let hi = result.insert(testname.clone(), (runtime, tr));
                 if let Some(_) = hi {
                     panic!("Test {testname} occured twice!");
                 }
@@ -562,6 +578,32 @@ async fn read_junit_file(
     }
 
     Ok(result)
+}
+
+async fn write_to_file(
+    res: &HashMap<TestName, (f32, TestResult)>,
+    key: &TestName,
+    path: &PathBuf,
+    k: FurtherClassificationResult,
+    prefix: &str,
+) -> Result<()> {
+    let tb_res = res.get(&key).unwrap();
+    let path = path.join(
+        format!(
+            "{}{k:?}+{}+{}+{}+{}",
+            prefix, key.krate_name, key.testsuites_name, key.classname, key.testname
+        )
+        .replace("/", ":"),
+    );
+    let mut file = tokio::fs::File::create(path).await?;
+    let ss = format!("TOOK TIME: {}\n", tb_res.0);
+    file.write_all(ss.as_bytes()).await?;
+    file.write_all(b"STDOUT: ###################\n").await?;
+    file.write_all(&tb_res.1.stdout.as_bytes()).await?;
+    file.write_all(b"STDERR: ###################\n").await?;
+    file.write_all(&tb_res.1.stderr.as_bytes()).await?;
+    drop(file);
+    Ok(())
 }
 
 async fn should_have_tests(folder: &PathBuf) -> Result<bool> {
@@ -618,15 +660,19 @@ async fn build_crate_list_discount(args: &Args, client: &Client) -> Result<Vec<C
 fn is_aliasing_bug(x: ClassificationResult) -> bool {
     match x {
         ClassificationResult::FailBoth {
-            sb: FurtherClassificationResult::UndefinedBehavior,
+            sb: FurtherClassificationResult::UndefinedBehaviorBorrow,
             ..
         } => true,
         ClassificationResult::FailBoth {
-            tb: FurtherClassificationResult::UndefinedBehavior,
+            tb: FurtherClassificationResult::UndefinedBehaviorBorrow,
             ..
         } => true,
-        ClassificationResult::FailTbOnly(FurtherClassificationResult::UndefinedBehavior) => true,
-        ClassificationResult::FailSbOnly(FurtherClassificationResult::UndefinedBehavior) => true,
+        ClassificationResult::FailTbOnly(FurtherClassificationResult::UndefinedBehaviorBorrow) => {
+            true
+        }
+        ClassificationResult::FailSbOnly(FurtherClassificationResult::UndefinedBehaviorBorrow) => {
+            true
+        }
         ClassificationResult::SucceedAll => false,
         _ => false,
     }

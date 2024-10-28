@@ -1,4 +1,4 @@
-FROM ubuntu:latest
+FROM ubuntu:22.04
 
 # Install the packages contained in `packages.txt`
 COPY packages.txt /packages.txt
