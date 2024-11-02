@@ -65,6 +65,7 @@ do
     if cargo download $crate /build; then
         ARGS=$(get-args $crate)
         cargo update &> /dev/null
+        mkdir -p $OUTPUTDIR
         cp Cargo.lock $OUTPUTDIR/Cargo.lock
         run_miri_thrice
     fi

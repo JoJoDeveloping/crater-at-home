@@ -189,7 +189,7 @@ pub async fn run(args: Args) -> Result<()> {
                     }
                     if args.live_log {
                         // strip off last \n
-                        let news = &output[output.len() - bytes_read..output.len() - 2];
+                        let news = &output[output.len() - bytes_read..output.len() - 1];
                         let news = String::from_utf8_lossy(news);
                         log::info!("log for {}: {}", krate.name, news);
                     }

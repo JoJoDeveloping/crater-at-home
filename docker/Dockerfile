@@ -13,13 +13,14 @@ RUN apt-get update && apt-get install -y curl build-essential && \
 RUN cargo install rustup-toolchain-install-master
 
 COPY nextest.toml /root/.cargo/nextest.toml
-COPY run.sh /root/run.sh
 COPY .gitconfig /root/.gitconfig
 
 ADD "https://api.github.com/repos/JoJoDeveloping/miri/commits?per_page=1&sha=miri-for-test-run" latest_commit
 RUN cd /tmp && git clone https://github.com/JoJoDeveloping/miri.git -b miri-for-test-run && cd miri && \
     ./miri toolchain && ./miri install
     
+
+COPY run.sh /root/run.sh
 
 RUN mkdir /build /output
 RUN rm -rf /root/.cache
