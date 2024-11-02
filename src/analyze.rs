@@ -220,7 +220,7 @@ fn analyze(
     nb_res: Option<&TestResult>,
     sb_res: Option<&TestResult>,
     tb_res: Option<&TestResult>,
-    args: &Args,
+    _args: &Args,
 ) -> ClassificationResult {
     let Some(nb_res) = nb_res else {
         return ClassificationResult::MissingPartially;
@@ -260,7 +260,7 @@ fn analyze(
         }
         (
             TestResultKind::Success,
-            k @ (TestResultKind::Success | TestResultKind::Failure),
+            _k @ (TestResultKind::Success | TestResultKind::Failure),
             TestResultKind::Timeout,
         ) => ClassificationResult::UnfilteredTimeout(UnfilteredTimeoutSource::TbOnly(0)),
         (
@@ -287,6 +287,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
         .iter()
         .map(|x| format!("{}@{}", x.name, x.version))
         .collect();
+    let mut crates_without_tests: BTreeSet<String> = BTreeSet::new();
     while let Some(entry) = entries.next_entry().await? {
         if entry.metadata().await?.is_dir() {
             let krate_name =
@@ -370,7 +371,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
                 );
                 match ana {
                     ClassificationResult::MissingPartially => {
-                        // to_rerun.insert(key.krate_name.clone());
+                        to_rerun.insert(key.krate_name.clone());
                         if res_nb.len() == 0 || res_sb.len() == 0 || res_tb.len() == 0 {
                             pg.inc(1);
                             continue 'nextcrate;
@@ -381,7 +382,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
                     //     log::warn!("Test {key} started succeeding after being filtered!");
                     // }
                     ClassificationResult::FailBoth { sb, tb } if tb != sb => {
-                        // to_rerun.insert(key.krate_name.clone());
+                        to_rerun.insert(key.krate_name.clone());
                         // log::warn!(
                         //     "Test {key} behaved incongruent on TB ({tb:?}) and SB ({sb:?})!"
                         // );
@@ -395,17 +396,14 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
                     ClassificationResult::FailSbOnly(
                         k @ FurtherClassificationResult::UndefinedBehaviorOther,
                     ) => write_to_file(&res_sb, &key, ana_data_path, k, "SBSB").await?,
-                    ClassificationResult::UnfilteredTimeout(_) => {
-                        to_rerun.insert(key.krate_name.clone());
+                    ClassificationResult::UnfilteredTimeout(UnfilteredTimeoutSource::TbOnly(
+                        ref mut _x,
+                    )) => {
+                        // *x = res_nb.get(&key).unwrap().0 as i32;
+                        // if *x < 10 {
+                        //     log::warn!("TB very slow {x} on test {key}!")
+                        // }
                     }
-                    // ClassificationResult::UnfilteredTimeout(UnfilteredTimeoutSource::TbOnly(
-                    //     ref mut x,
-                    // )) => {
-                    //     *x = res_sb.get(&key).unwrap().0 as i32;
-                    //     if *x < 10 {
-                    //         log::warn!("TB very slow {x} on test {key}!")
-                    //     }
-                    // }
                     _ => {}
                 }
                 rs.insert(key, ana);
@@ -421,8 +419,11 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
                     if args.show_some_without_tests {
                         log::warn!("No tests in crate {path:?} but things suggests there are!");
                     }
-                } else if args.show_some_without_tests && rng.next_u32() % 500 == 4 {
-                    log::warn!("No tests in crate {path:?}!");
+                } else {
+                    crates_without_tests.insert(krate_name);
+                    if args.show_some_without_tests && rng.next_u32() % 500 == 4 {
+                        log::warn!("No tests in crate {path:?}!");
+                    }
                 }
             }
             pg.inc(1);
@@ -450,6 +451,15 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
         .join("\n");
     newf.push('\n');
     File::create("spurious_crates.txt")
+        .await?
+        .write_all(newf.as_bytes())
+        .await?;
+    let mut newf = crates_without_tests
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("\n");
+    newf.push('\n');
+    File::create("crates_without_tests.txt")
         .await?
         .write_all(newf.as_bytes())
         .await?;
