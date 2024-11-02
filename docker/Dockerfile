@@ -25,7 +25,7 @@ COPY run.sh /root/run.sh
 RUN mkdir /build /output
 RUN rm -rf /root/.cache
 RUN for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do \
-        echo "tb-sb-differences-canary@0.1.0" | TOOL=miri TARGET=$target TEST_END_DELIMITER="-" bash /root/run.sh; \
+        echo "tb-sb-differences-canary@0.2.0" | TOOL=miri TARGET=$target TEST_END_DELIMITER="-" bash /root/run.sh; \
     done
 RUN tar czvf /cache.tar.gz /root/.cache
 RUN rm -rf /root/.cache /build
