@@ -1,3 +1,4 @@
+#![feature(btree_extract_if)]
 use clap::Parser;
 use color_eyre::Result;
 use indicatif::MultiProgress;

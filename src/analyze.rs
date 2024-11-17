@@ -11,7 +11,7 @@ use std::{
     path::PathBuf,
     process::Stdio,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 use tokio::{
     fs::File,
@@ -31,8 +31,6 @@ pub struct Args {
     )]
     // That sounded like a good idea, but the it's unclear whether these would be Filtered or FailBoth if both fail. So let's not do this. It's only 200 anyway.
     recover_timeout: bool,
-    #[clap(long, action, help = "Add explainer text to each category.")]
-    explain: bool,
     #[clap(
         long,
         action,
@@ -157,62 +155,47 @@ enum FurtherClassificationResult {
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
-enum UnfilteredTimeoutSource {
-    TbOnly(i32),
-    SbOnly,
-    Both,
+enum RunResult {
+    Success,
+    Failure(FurtherClassificationResult),
+    Timeout,
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, PartialOrd, Ord)]
 enum ClassificationResult {
     MissingPartially,
-    Filtered(FurtherClassificationResult),
-    // FilteredCuriously,
     FilteredTimeout,
-    // FilteredTimeoutRecoverable,
-    UnfilteredTimeout(UnfilteredTimeoutSource),
-    SucceedAll,
-    FailBoth {
-        sb: FurtherClassificationResult,
-        tb: FurtherClassificationResult,
-    },
-    FailSbOnly(FurtherClassificationResult),
-    FailTbOnly(FurtherClassificationResult),
+    Filtered(FurtherClassificationResult),
+    Compared { tb: RunResult, sb: RunResult },
 }
 
-impl ClassificationResult {
-    pub fn describe(self) -> &'static str {
-        match self {
-            ClassificationResult::MissingPartially => "The test did not exist in some miri modes. This should not happen.",
-            ClassificationResult::Filtered(_) => "The test failed already without any aliasing model (due to e.g. foreign functions or int-to-ptr casts), we exclude it from analysis.",
-            // ClassificationResult::FilteredCuriously => "The test failed without any aliasing model, but it later worked _with_ an aliasing model. It is a flaky test and still excluded.",
-            ClassificationResult::FilteredTimeout => "The test ran into a timeout without the aliasing model.",
-            // ClassificationResult::FilteredTimeoutRecoverable => "The test ran into a timeout without the aliasing model, but it finished in time with both aliasing models. Use --recover-timeout to include them in the analysis.",
-            ClassificationResult::UnfilteredTimeout(_) => "The test ran into a timeout _with_ one of the aliasing models, after succeeding before.",
-            ClassificationResult::SucceedAll => "The test always succeeded. Yay.",
-            ClassificationResult::FailBoth{..} => "The test fails on both aliasing models.",
-            ClassificationResult::FailSbOnly(_) => "The test succeeded with Tree Borrows, but failed with Stacked Borrows. This number counts cases where TB is more permissive.",
-            ClassificationResult::FailTbOnly(_) => "The test succeeded with Stacked Borrows, but failed with Tree Borrows. These are interesting, since they exploit SB weirdness.",
-        }
-    }
-}
+static BORROW_UB_REGEX: OnceLock<Regex> = OnceLock::new();
 
 fn analyze_further(result: &TestResult) -> FurtherClassificationResult {
-    let regex = Regex::new("error: Undefined Behavior: Data race detected between .* retag (read|write)( of type `.[^`]*`|) on thread").unwrap();
-    if result.stderr.contains("help: this indicates a potential bug in the program: it performed an invalid operation, but the Tree Borrows rules it violated are still experimental") {
+    let regex = BORROW_UB_REGEX.get_or_init(|| {
+        Regex::new("(error: Undefined Behavior: Data race detected between .* retag (read|write)( of type `.[^`]*`|) on thread|help: this indicates a potential bug in the program: it performed an invalid operation, but the (Tree|Stacked) Borrows rules it violated are still experimental)").unwrap()
+    });
+    if regex.is_match(&result.stderr) {
         return FurtherClassificationResult::UndefinedBehaviorBorrow;
-    } else if result.stderr.contains("help: this indicates a potential bug in the program: it performed an invalid operation, but the Stacked Borrows rules it violated are still experimental") {
-        return FurtherClassificationResult::UndefinedBehaviorBorrow;
-    } else if regex.is_match(&result.stderr) {
-        return FurtherClassificationResult::UndefinedBehaviorBorrow;
-    }else if result.stderr.contains("thread 'rustc' has overflowed its stack\nfatal runtime error: stack overflow") {
+    } else if result
+        .stderr
+        .contains("thread 'rustc' has overflowed its stack\nfatal runtime error: stack overflow")
+    {
         return FurtherClassificationResult::RustcStackOverflow;
     } else if result.stderr.contains("error: unsupported operation: ") {
         return FurtherClassificationResult::UnsupportedOperation;
     } else if result.stderr.contains("error: Undefined Behavior:") {
-        return FurtherClassificationResult::UndefinedBehaviorOther
+        return FurtherClassificationResult::UndefinedBehaviorOther;
     } else {
         return FurtherClassificationResult::Unknown;
+    }
+}
+
+fn analyze_test_result_tbsb(res: &TestResult) -> RunResult {
+    match res.kind {
+        TestResultKind::Timeout => RunResult::Timeout,
+        TestResultKind::Success => RunResult::Success,
+        TestResultKind::Failure => RunResult::Failure(analyze_further(res)),
     }
 }
 
@@ -231,43 +214,13 @@ fn analyze(
     let Some(tb_res) = tb_res else {
         return ClassificationResult::MissingPartially;
     };
-    match (nb_res.kind, sb_res.kind, tb_res.kind) {
-        (TestResultKind::Timeout, _, _) => ClassificationResult::FilteredTimeout,
-        (TestResultKind::Success, TestResultKind::Success, TestResultKind::Success) => {
-            ClassificationResult::SucceedAll
-        }
-        (TestResultKind::Success, TestResultKind::Success, TestResultKind::Failure) => {
-            ClassificationResult::FailTbOnly(analyze_further(tb_res))
-        }
-        (TestResultKind::Success, TestResultKind::Failure, TestResultKind::Success) => {
-            ClassificationResult::FailSbOnly(analyze_further(sb_res))
-        }
-        (TestResultKind::Success, TestResultKind::Failure, TestResultKind::Failure) => {
-            ClassificationResult::FailBoth {
-                sb: analyze_further(sb_res),
-                tb: analyze_further(tb_res),
-            }
-        }
-        (TestResultKind::Failure, _a, _b) => {
-            // if a == TestResultKind::Success || b == TestResultKind::Success {
-            //     ClassificationResult::FilteredCuriously
-            // } else {
-            ClassificationResult::Filtered(analyze_further(nb_res))
-            // }
-        }
-        (TestResultKind::Success, TestResultKind::Timeout, TestResultKind::Timeout) => {
-            ClassificationResult::UnfilteredTimeout(UnfilteredTimeoutSource::Both)
-        }
-        (
-            TestResultKind::Success,
-            _k @ (TestResultKind::Success | TestResultKind::Failure),
-            TestResultKind::Timeout,
-        ) => ClassificationResult::UnfilteredTimeout(UnfilteredTimeoutSource::TbOnly(0)),
-        (
-            TestResultKind::Success,
-            TestResultKind::Timeout,
-            TestResultKind::Success | TestResultKind::Failure,
-        ) => ClassificationResult::UnfilteredTimeout(UnfilteredTimeoutSource::SbOnly),
+    match nb_res.kind {
+        TestResultKind::Timeout => ClassificationResult::FilteredTimeout,
+        TestResultKind::Failure => ClassificationResult::Filtered(analyze_further(nb_res)),
+        TestResultKind::Success => ClassificationResult::Compared {
+            tb: analyze_test_result_tbsb(tb_res),
+            sb: analyze_test_result_tbsb(sb_res),
+        },
     }
 }
 
@@ -307,6 +260,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             count1 += 1;
         }
     }
+    let crates_missing_due_to_too_long = crates_that_should_have_run.len();
     if crates_that_should_have_run.len() > 0 {
         log::warn!(
             "The following ({}) crates are yet missing: {:?}",
@@ -330,6 +284,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
     let mut total_crates = 0;
     let mut crates_with_tests = 0;
     let mut crates_with_tb_error = BTreeSet::new();
+    let mut crates_with_sb_error = BTreeSet::new();
     let ana_data_path = &PathBuf::from_str(&args.analysis_results_folder)?;
     tokio::fs::create_dir_all(ana_data_path).await?;
     'nextcrate: while let Some(entry) = entries.next_entry().await? {
@@ -363,7 +318,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             });
             let mut hadtest = false;
             for key in keyset {
-                let mut ana = analyze(
+                let ana = analyze(
                     res_nb.get(&key).map(|x| &x.1),
                     res_sb.get(&key).map(|x| &x.1),
                     res_tb.get(&key).map(|x| &x.1),
@@ -378,30 +333,30 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
                         }
                         log::warn!("Test {key} is only present in some test outputs!");
                     }
-                    // ClassificationResult::FilteredCuriously => {
-                    //     log::warn!("Test {key} started succeeding after being filtered!");
-                    // }
-                    ClassificationResult::FailBoth { sb, tb } if tb != sb => {
-                        to_rerun.insert(key.krate_name.clone());
-                        // log::warn!(
-                        //     "Test {key} behaved incongruent on TB ({tb:?}) and SB ({sb:?})!"
-                        // );
-                    }
-                    ClassificationResult::FailTbOnly(k) => {
+                    ClassificationResult::Compared {
+                        tb: RunResult::Failure(k),
+                        sb: RunResult::Success,
+                    } => {
                         if matches!(k, FurtherClassificationResult::UndefinedBehaviorBorrow) {
                             crates_with_tb_error.insert(key.krate_name.clone());
                         }
-                        write_to_file(&res_tb, &key, ana_data_path, k, "TBTB").await?
+                        write_to_file(&res_tb, &key, ana_data_path, k, "TBTB").await?;
+                        write_to_file(&res_sb, &key, ana_data_path, k, "SBforTB").await?
                     }
-                    ClassificationResult::FailSbOnly(
-                        k @ FurtherClassificationResult::UndefinedBehaviorOther,
-                    ) => write_to_file(&res_sb, &key, ana_data_path, k, "SBSB").await?,
-                    ClassificationResult::UnfilteredTimeout(UnfilteredTimeoutSource::TbOnly(
-                        ref mut _x,
-                    )) => {
-                        // *x = res_nb.get(&key).unwrap().0 as i32;
-                        // if *x < 10 {
-                        //     log::warn!("TB very slow {x} on test {key}!")
+                    ClassificationResult::Compared {
+                        sb: RunResult::Failure(FurtherClassificationResult::UndefinedBehaviorBorrow),
+                        tb: _k,
+                    } => {
+                        crates_with_sb_error.insert(key.krate_name.clone());
+                        // if k == RunResult::Success {
+                        //     write_to_file(
+                        //         &res_sb,
+                        //         &key,
+                        //         ana_data_path,
+                        //         FurtherClassificationResult::UndefinedBehaviorBorrow,
+                        //         "SBSB",
+                        //     )
+                        //     .await?
                         // }
                     }
                     _ => {}
@@ -433,10 +388,9 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
     if count1 != total_crates {
         log::error!("Number of crates changed in-between!");
     }
-    // sometimes, copying the junit.xml file fails with
     if to_rerun.len() > 0 {
         log::warn!(
-            "The following ({}) crates had spurious analysis bugs (missing junit.xml files) and need to be re-run: {:?}",
+            "The following ({}) crates had spurious analysis bugs and need to be re-run: {:?}",
             to_rerun.len(),
             to_rerun
         );
@@ -466,37 +420,260 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
     let mut total = 0;
     for (k, v) in &count_per_category {
         println!("Category {k:?}: {v}");
-        if args.explain {
-            println!("  Explanation for {k:?}: {}", k.describe());
-        }
         total += *v;
     }
     println!(
         "Total: {total} tests from {crates_with_tests} crates, with {total_crates} tested in total (including crates without tests)"
     );
+    let crates_with_tb_error_count_nofilter = crates_with_tb_error.len();
     {
         let total_aliasing_bugs: u32 = count_per_category
             .iter()
             .filter_map(|(k, v)| if is_aliasing_bug(*k) { Some(*v) } else { None })
             .sum();
-        let fixed_by_tb = count_per_category
-            .get(&ClassificationResult::FailSbOnly(
-                FurtherClassificationResult::UndefinedBehaviorBorrow,
-            ))
-            .copied()
-            .unwrap_or(0u32);
-        let broken_by_tb = count_per_category
-            .get(&ClassificationResult::FailTbOnly(
-                FurtherClassificationResult::UndefinedBehaviorBorrow,
-            ))
-            .copied()
-            .unwrap_or(0u32);
+        let fixed_by_tb = count_per_category.count(ClassificationResult::Compared {
+            tb: RunResult::Success,
+            sb: RunResult::Failure(FurtherClassificationResult::UndefinedBehaviorBorrow),
+        });
+        let broken_by_tb = count_per_category.count(ClassificationResult::Compared {
+            sb: RunResult::Success,
+            tb: RunResult::Failure(FurtherClassificationResult::UndefinedBehaviorBorrow),
+        });
         let percent = 100f64 * (f64::from(fixed_by_tb) / f64::from(total_aliasing_bugs));
         let percent_broken = 100f64 * (f64::from(broken_by_tb) / f64::from(total_aliasing_bugs));
-        println!("Tagline: Tree Borrows fixes {percent:.1}% of all aliasing bugs!!1! (Newly broken: {percent_broken:.3}% of aliasing bugs, found across only {} crates)", crates_with_tb_error.len());
+        println!("Tagline: Tree Borrows fixes {percent:.1}% of all aliasing bugs!!1! (Newly broken: {percent_broken:.3}% of aliasing bugs, found across only {} crates)", crates_with_tb_error_count_nofilter);
         println!("  These crates are: {crates_with_tb_error:?}");
+        crates_with_tb_error
+            .extract_if(|x| crates_with_sb_error.contains(x))
+            .for_each(|x| drop(x));
+        println!("  After filtering out those with SB errors as well: {crates_with_tb_error:?}");
     }
+    let fancytable = print_fancy_table(
+        &count_per_category,
+        total_crates,
+        crates_missing_due_to_too_long,
+        crates_with_tb_error_count_nofilter,
+    );
+    File::create("experiment_results.tex")
+        .await?
+        .write_all(fancytable.as_bytes())
+        .await?;
     Ok(())
+}
+
+trait Foo {
+    fn count(&self, data: ClassificationResult) -> u32;
+}
+
+impl Foo for BTreeMap<ClassificationResult, u32> {
+    fn count(&self, data: ClassificationResult) -> u32 {
+        self.get(&data).copied().unwrap_or_else(|| 0)
+    }
+}
+
+fn print_fancy_table(
+    res: &BTreeMap<ClassificationResult, u32>,
+    total_crates: u64,
+    crates_missing_due_to_too_long: usize,
+    num_crates_tb_only: usize,
+) -> String {
+    use std::fmt::Write;
+    let mut rs = String::new();
+    writeln!(rs, "%THIS FILE IS AUTOGENERATED. DO NOT MODIFY\n\\newcommand{{\\pct}}[1]{{$#1\\%$}}\n\\newcolumntype{{R}}[2]{{%\n    >{{\\adjustbox{{angle=#1,lap=\\width-(#2),set height=2.5em,raise=-1em}}\\bgroup}}%\n    r%\n    <{{\\egroup}}%\n}}\n\\newcommand*\\rot{{\\multicolumn{{1}}{{R{{45}}{{1em}}}}}}% no optional argument here, please!").unwrap();
+    writeln!(rs, "\\begin{{figure}}\\centering\\footnotesize").unwrap();
+    let total: u32 = res.iter().map(|x| *x.1).sum();
+    let passed_filtering;
+    // we ignore these
+    let total = total - res.count(ClassificationResult::MissingPartially);
+    {
+        let timeout = res.count(ClassificationResult::FilteredTimeout);
+        let unsupported = res.count(ClassificationResult::Filtered(
+            FurtherClassificationResult::UnsupportedOperation,
+        ));
+        let ub = res.count(ClassificationResult::Filtered(
+            FurtherClassificationResult::UndefinedBehaviorOther,
+        ));
+        let ub_borrow = res.count(ClassificationResult::Filtered(
+            FurtherClassificationResult::UndefinedBehaviorBorrow,
+        ));
+        assert_eq!(ub_borrow, 0);
+        let rustc_overflow = res.count(ClassificationResult::Filtered(
+            FurtherClassificationResult::RustcStackOverflow,
+        ));
+        assert_eq!(rustc_overflow, 0);
+        let unknown = res.count(ClassificationResult::Filtered(
+            FurtherClassificationResult::Unknown,
+        ));
+        let success: u32 = res
+            .iter()
+            .filter_map(|(res, num)| match res {
+                ClassificationResult::Compared { .. } => Some(*num),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(success, total - timeout - unsupported - ub - unknown);
+        let timeout_pc = timeout as f64 / total as f64 * 100.0f64;
+        let unsupported_pc = unsupported as f64 / total as f64 * 100.0f64;
+        let ub_pc = ub as f64 / total as f64 * 100.0f64;
+        let unknown_pc = unknown as f64 / total as f64 * 100.0f64;
+        let success_pc = success as f64 / total as f64 * 100.0f64;
+        let sum: u32 = timeout + unsupported + ub + unknown + success;
+        let sum_pc = sum as f64 / total as f64 * 100.0f64;
+        writeln!(rs, "\\begin{{subfigure}}[b]{{0.36\\textwidth}}\\centering\n\\begin{{tabular}}{{c|r|r}}\n\\textbf{{Cause}}&\\textbf{{Number}}&\\textbf{{Percent}}\\\\\\hline&&\\\\[-9pt]\n        Timeout&\\num{{{timeout}}}&\\pct{{{timeout_pc:.2}}}\\\\[2pt]\n        Unsupported&\\num{{{unsupported}}}&\\pct{{{unsupported_pc:.2}}}\\\\[2pt]\n        UB&\\num{{{ub}}}&\\pct{{{ub_pc:.2}}}\\\\[2pt]\n        Failure&\\num{{{unknown}}}&\\pct{{{unknown_pc:.2}}}\\\\[2pt]\n        Pass&\\num{{{success}}}&\\pct{{{success_pc:.2}}}\\\\[1pt]\\hline\n        $\\sum$&\\num{{{sum}}}&\\pct{{{sum_pc:.2}}}\\\\\n\\end{{tabular}}\n\\caption{{Filtering Run Results}}\n\\label{{fig:experiment-results-filtering}}\n\\end{{subfigure}}%").unwrap();
+        passed_filtering = success;
+    }
+    writeln!(rs, "\\hfill%").unwrap();
+    {
+        let arr = [
+            ("Pass", RunResult::Success),
+            (
+                "Borrow UB",
+                RunResult::Failure(FurtherClassificationResult::UndefinedBehaviorBorrow),
+            ),
+            (
+                "Other UB",
+                RunResult::Failure(FurtherClassificationResult::UndefinedBehaviorOther),
+            ),
+            ("Timeout", RunResult::Timeout),
+            (
+                "Unsupported",
+                RunResult::Failure(FurtherClassificationResult::UnsupportedOperation),
+            ),
+            (
+                "Failure",
+                RunResult::Failure(FurtherClassificationResult::Unknown),
+            ),
+            (
+                "",
+                RunResult::Failure(FurtherClassificationResult::RustcStackOverflow),
+            ),
+        ];
+        write!(rs, "\\begin{{subfigure}}[b]{{0.61\\textwidth}}\\centering\\vspace{{1em}}\n\\begin{{tabular}}{{r|rrrrrr|r}}\n    \\diagbox[width=\\widthof{{Unsupported}}+1em,height=3em]{{\\textbf{{TB}}}}{{\\textbf{{SB}}}} ").unwrap();
+        for (mut name, _) in arr {
+            if arr.is_empty() {
+                write!(rs, "& \\raisebox{{-0.8em}}{{$\\sum$}}").unwrap();
+            } else {
+                // if name == "Unsupp." {
+                //     name = "Unsupported";
+                // }
+                write!(rs, "& \\rot{{{name}}}").unwrap();
+            }
+        }
+        writeln!(rs, "\\\\\\hline").unwrap();
+        for (name, tb) in arr {
+            write!(rs, "{name}").unwrap();
+            let mut sum = 0;
+            for (name2, sb) in arr {
+                let res = res.count(ClassificationResult::Compared { tb, sb });
+                if name.is_empty() || name2.is_empty() {
+                    assert_eq!(res, 0);
+                } else {
+                    write!(rs, "&\\num{{{res}}}").unwrap();
+                }
+                sum += res;
+            }
+            if !name.is_empty() {
+                writeln!(rs, "&\\num{{{sum}}}\\\\").unwrap();
+            }
+        }
+        {
+            write!(rs, "\\hline$\\sum$").unwrap();
+            let mut tot = 0;
+            for (name, sb) in arr {
+                let sum: u32 = res
+                    .iter()
+                    .filter_map(|(rr, cnt)| match rr {
+                        ClassificationResult::Compared { sb: sb2, .. } if *sb2 == sb => Some(*cnt),
+                        _ => None,
+                    })
+                    .sum();
+                tot += sum;
+                if name.is_empty() {
+                    assert_eq!(sum, 0);
+                } else {
+                    write!(rs, "&\\num{{{sum}}}").unwrap();
+                }
+            }
+            writeln!(rs, "&\\num{{{tot}}}").unwrap();
+        }
+        writeln!(rs, "\\end{{tabular}}\n\\caption{{Results of Comparing Tree (TB) and Stacked Borrows (SB)}}\n\\label{{fig:experiment-results-comparison}}\n\\end{{subfigure}}%").unwrap();
+    }
+    writeln!(rs, "\\caption{{Results of Running \\num{{{total}}} Tests From \\num{{{total_crates}}} Crates}}\n\\label{{fig:experiment-results}}\n\\end{{figure}}%").unwrap();
+    writeln!(
+        rs,
+        "\\newcommand{{\\TBResultsCratesMissingTooLong}}{{\\num{{{crates_missing_due_to_too_long}}}}}%"
+    )
+    .unwrap();
+    writeln!(
+        rs,
+        "\\newcommand{{\\TBResultsTotalTests}}{{\\num{{{total}}}}}%"
+    )
+    .unwrap();
+    writeln!(
+        rs,
+        "\\newcommand{{\\TBResultsPassedFiltering}}{{\\num{{{passed_filtering}}}}}%"
+    )
+    .unwrap();
+    writeln!(
+        rs,
+        "\\newcommand{{\\TBResultsPassedFilteringPct}}{{\\num{{{:.0}}}}}%",
+        (100 * passed_filtering) as f64 / total as f64
+    )
+    .unwrap();
+    let num_sb = res
+        .iter()
+        .filter_map(|(k, n)| match k {
+            ClassificationResult::Compared {
+                sb: RunResult::Failure(FurtherClassificationResult::UndefinedBehaviorBorrow),
+                ..
+            } => Some(*n),
+            _ => None,
+        })
+        .sum::<u32>();
+    let num_tb = res
+        .iter()
+        .filter_map(|(k, n)| match k {
+            ClassificationResult::Compared {
+                tb: RunResult::Failure(FurtherClassificationResult::UndefinedBehaviorBorrow),
+                ..
+            } => Some(*n),
+            _ => None,
+        })
+        .sum::<u32>();
+    let num_tb_only = res
+        .get(&ClassificationResult::Compared {
+            tb: RunResult::Failure(FurtherClassificationResult::UndefinedBehaviorBorrow),
+            sb: RunResult::Success,
+        })
+        .copied()
+        .unwrap_or(0);
+    writeln!(
+        rs,
+        "\\newcommand{{\\TBFailStackedBorrowsSum}}{{\\num{{{num_sb}}}}}%"
+    )
+    .unwrap();
+    writeln!(
+        rs,
+        "\\newcommand{{\\TBFailTreeBorrowsSum}}{{\\num{{{num_tb}}}}}%"
+    )
+    .unwrap();
+    writeln!(
+        rs,
+        "\\newcommand{{\\TBFailTreeBorrowsOnly}}{{\\num{{{num_tb_only}}}}}%"
+    )
+    .unwrap();
+    writeln!(
+        rs,
+        "\\newcommand{{\\TBFailStackedTreeReductionPct}}{{\\num{{{:.2}}}}}%",
+        (100 * (num_sb - num_tb)) as f64 / num_sb as f64
+    )
+    .unwrap();
+    writeln!(
+        rs,
+        "\\newcommand{{\\TBFailTreeBorrowsOnlyCrates}}{{\\num{{{num_crates_tb_only}}}}}%"
+    )
+    .unwrap();
+    rs
 }
 
 fn get_test_result(i: &Node) -> TestResult {
@@ -669,21 +846,14 @@ async fn build_crate_list_discount(args: &Args, client: &Client) -> Result<Vec<C
 
 fn is_aliasing_bug(x: ClassificationResult) -> bool {
     match x {
-        ClassificationResult::FailBoth {
-            sb: FurtherClassificationResult::UndefinedBehaviorBorrow,
-            ..
+        ClassificationResult::Compared {
+            sb: RunResult::Failure(FurtherClassificationResult::UndefinedBehaviorBorrow),
+            tb: _,
         } => true,
-        ClassificationResult::FailBoth {
-            tb: FurtherClassificationResult::UndefinedBehaviorBorrow,
-            ..
+        ClassificationResult::Compared {
+            tb: RunResult::Failure(FurtherClassificationResult::UndefinedBehaviorBorrow),
+            sb: _,
         } => true,
-        ClassificationResult::FailTbOnly(FurtherClassificationResult::UndefinedBehaviorBorrow) => {
-            true
-        }
-        ClassificationResult::FailSbOnly(FurtherClassificationResult::UndefinedBehaviorBorrow) => {
-            true
-        }
-        ClassificationResult::SucceedAll => false,
         _ => false,
     }
 }
