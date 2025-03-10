@@ -87,6 +87,7 @@ struct TestResult {
     kind: TestResultKind,
     stdout: String,
     stderr: String,
+    time: f64,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -204,24 +205,27 @@ fn analyze(
     sb_res: Option<&TestResult>,
     tb_res: Option<&TestResult>,
     _args: &Args,
-) -> ClassificationResult {
+) -> (ClassificationResult, (f64, f64)) {
     let Some(nb_res) = nb_res else {
-        return ClassificationResult::MissingPartially;
+        return (ClassificationResult::MissingPartially, (0.0, 0.0));
     };
     let Some(sb_res) = sb_res else {
-        return ClassificationResult::MissingPartially;
+        return (ClassificationResult::MissingPartially, (0.0, 0.0));
     };
     let Some(tb_res) = tb_res else {
-        return ClassificationResult::MissingPartially;
+        return (ClassificationResult::MissingPartially, (0.0, 0.0));
     };
-    match nb_res.kind {
-        TestResultKind::Timeout => ClassificationResult::FilteredTimeout,
-        TestResultKind::Failure => ClassificationResult::Filtered(analyze_further(nb_res)),
-        TestResultKind::Success => ClassificationResult::Compared {
-            tb: analyze_test_result_tbsb(tb_res),
-            sb: analyze_test_result_tbsb(sb_res),
+    (
+        match nb_res.kind {
+            TestResultKind::Timeout => ClassificationResult::FilteredTimeout,
+            TestResultKind::Failure => ClassificationResult::Filtered(analyze_further(nb_res)),
+            TestResultKind::Success => ClassificationResult::Compared {
+                tb: analyze_test_result_tbsb(tb_res),
+                sb: analyze_test_result_tbsb(sb_res),
+            },
         },
-    }
+        (sb_res.time, tb_res.time),
+    )
 }
 
 #[tokio::main]
@@ -236,9 +240,10 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
     let include = as_list(&args.only, true);
     let client = Arc::new(Client::new("output".into()).await?);
     let crates_that_should_have_run = build_crate_list_discount(&args, &client).await?;
-    let mut crates_that_should_have_run: BTreeSet<_> = crates_that_should_have_run
+    let mut crates_that_should_have_run: BTreeMap<_, _> = crates_that_should_have_run
         .iter()
-        .map(|x| format!("{}@{}", x.name, x.version))
+        .enumerate()
+        .map(|(idx, x)| (format!("{}@{}", x.name, x.version), idx))
         .collect();
     let mut crates_without_tests: BTreeSet<String> = BTreeSet::new();
     while let Some(entry) = entries.next_entry().await? {
@@ -246,9 +251,10 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             let krate_name =
                 String::from_utf8_lossy(entry.file_name().as_encoded_bytes()).to_string();
             if krate_name.chars().next().unwrap() == '.' {
+                println!("Skipping spurious crate {krate_name}");
                 continue;
             }
-            if !args.partial && !crates_that_should_have_run.remove(&krate_name) {
+            if !args.partial && !crates_that_should_have_run.remove(&krate_name).is_some() {
                 log::warn!("Krate {krate_name} was not supposed to have run!");
             }
             if exclude(&krate_name) {
@@ -258,6 +264,8 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
                 continue;
             }
             count1 += 1;
+        } else {
+            println!("Skipping spurious file {entry:?}");
         }
     }
     let crates_missing_due_to_too_long = crates_that_should_have_run.len();
@@ -283,8 +291,10 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
     let mut count_per_category = BTreeMap::new();
     let mut total_crates = 0;
     let mut crates_with_tests = 0;
-    let mut crates_with_tb_error = BTreeSet::new();
+    let mut crates_with_tb_error = BTreeMap::new();
     let mut crates_with_sb_error = BTreeSet::new();
+    let mut sb_total_time = 0.0;
+    let mut tb_total_time = 0.0;
     let ana_data_path = &PathBuf::from_str(&args.analysis_results_folder)?;
     tokio::fs::create_dir_all(ana_data_path).await?;
     'nextcrate: while let Some(entry) = entries.next_entry().await? {
@@ -318,12 +328,10 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             });
             let mut hadtest = false;
             for key in keyset {
-                let ana = analyze(
-                    res_nb.get(&key).map(|x| &x.1),
-                    res_sb.get(&key).map(|x| &x.1),
-                    res_tb.get(&key).map(|x| &x.1),
-                    &args,
-                );
+                let (ana, (sbdelta, tbdelta)) =
+                    analyze(res_nb.get(&key), res_sb.get(&key), res_tb.get(&key), &args);
+                tb_total_time += tbdelta;
+                sb_total_time += sbdelta;
                 match ana {
                     ClassificationResult::MissingPartially => {
                         to_rerun.insert(key.krate_name.clone());
@@ -338,10 +346,19 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
                         sb: RunResult::Success,
                     } => {
                         if matches!(k, FurtherClassificationResult::UndefinedBehaviorBorrow) {
-                            crates_with_tb_error.insert(key.krate_name.clone());
+                            *crates_with_tb_error
+                                .entry(key.krate_name.clone())
+                                .or_insert(0) += 1;
                         }
                         write_to_file(&res_tb, &key, ana_data_path, k, "TBTB").await?;
                         write_to_file(&res_sb, &key, ana_data_path, k, "SBforTB").await?
+                    }
+
+                    ClassificationResult::Compared {
+                        tb: RunResult::Timeout,
+                        sb: RunResult::Success,
+                    } => {
+                        // println!("Timeouting test: {key}");
                     }
                     ClassificationResult::Compared {
                         sb: RunResult::Failure(FurtherClassificationResult::UndefinedBehaviorBorrow),
@@ -359,6 +376,10 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
                         //     .await?
                         // }
                     }
+                    ClassificationResult::Compared {
+                        tb: RunResult::Success,
+                        sb: RunResult::Success,
+                    } => {}
                     _ => {}
                 }
                 rs.insert(key, ana);
@@ -395,6 +416,10 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
             to_rerun
         );
     }
+    let mut crates_that_should_have_run: BTreeSet<_> = crates_that_should_have_run
+        .into_iter()
+        .map(|(x, _)| x)
+        .collect();
     crates_that_should_have_run.append(&mut to_rerun);
     if !crates_that_should_have_run.is_empty() {
         log::warn!("The file spurious_crates.txt has automatically been created to pass to a run.");
@@ -444,7 +469,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
         println!("Tagline: Tree Borrows fixes {percent:.1}% of all aliasing bugs!!1! (Newly broken: {percent_broken:.3}% of aliasing bugs, found across only {} crates)", crates_with_tb_error_count_nofilter);
         println!("  These crates are: {crates_with_tb_error:?}");
         crates_with_tb_error
-            .extract_if(|x| crates_with_sb_error.contains(x))
+            .extract_if(|x, y| crates_with_sb_error.contains(x))
             .for_each(|x| drop(x));
         println!("  After filtering out those with SB errors as well: {crates_with_tb_error:?}");
     }
@@ -458,6 +483,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
         .await?
         .write_all(fancytable.as_bytes())
         .await?;
+    println!("Timing: TB: {tb_total_time}    SB: {sb_total_time}");
     Ok(())
 }
 
@@ -549,7 +575,7 @@ fn print_fancy_table(
             ),
         ];
         write!(rs, "\\begin{{subfigure}}[b]{{0.61\\textwidth}}\\centering\\vspace{{1em}}\n\\begin{{tabular}}{{r|rrrrrr|r}}\n    \\diagbox[width=\\widthof{{Unsupported}}+1em,height=3em]{{\\textbf{{TB}}}}{{\\textbf{{SB}}}} ").unwrap();
-        for (mut name, _) in arr {
+        for (name, _) in arr {
             if arr.is_empty() {
                 write!(rs, "& \\raisebox{{-0.8em}}{{$\\sum$}}").unwrap();
             } else {
@@ -676,7 +702,7 @@ fn print_fancy_table(
     rs
 }
 
-fn get_test_result(i: &Node) -> TestResult {
+fn get_test_result(i: &Node, time: f64) -> TestResult {
     let mut res = TestResultKind::Success;
     let mut system_out = String::new();
     let mut system_err = String::new();
@@ -712,13 +738,14 @@ fn get_test_result(i: &Node) -> TestResult {
         kind: res,
         stdout: system_out,
         stderr: system_err,
+        time,
     }
 }
 
 async fn read_junit_file(
     path: &PathBuf,
     krate_name: &String,
-) -> Result<HashMap<TestName, (f32, TestResult)>> {
+) -> Result<HashMap<TestName, TestResult>> {
     let path = path.join("junit.xml");
     if !tokio::fs::try_exists(&path).await? {
         return Ok(Default::default());
@@ -748,15 +775,15 @@ async fn read_junit_file(
                 let classname = test.attribute("classname").unwrap();
                 assert_eq!(classname, testsuite_name);
                 let runtime = test.attribute("time").unwrap();
-                let runtime = f32::from_str(runtime).unwrap();
-                let tr = get_test_result(&test);
+                let runtime = f64::from_str(runtime).unwrap();
+                let tr = get_test_result(&test, runtime);
                 let testname = TestName {
                     krate_name: krate_name.clone(),
                     testsuites_name: testsuites_name.to_string(),
                     classname: classname.to_string(),
                     testname: name.to_string(),
                 };
-                let hi = result.insert(testname.clone(), (runtime, tr));
+                let hi = result.insert(testname.clone(), tr);
                 if let Some(_) = hi {
                     panic!("Test {testname} occured twice!");
                 }
@@ -768,7 +795,7 @@ async fn read_junit_file(
 }
 
 async fn write_to_file(
-    res: &HashMap<TestName, (f32, TestResult)>,
+    res: &HashMap<TestName, TestResult>,
     key: &TestName,
     path: &PathBuf,
     k: FurtherClassificationResult,
@@ -783,12 +810,12 @@ async fn write_to_file(
         .replace("/", ":"),
     );
     let mut file = tokio::fs::File::create(path).await?;
-    let ss = format!("TOOK TIME: {}\n", tb_res.0);
+    let ss = format!("TOOK TIME: {}\n", tb_res.time);
     file.write_all(ss.as_bytes()).await?;
     file.write_all(b"STDOUT: ###################\n").await?;
-    file.write_all(&tb_res.1.stdout.as_bytes()).await?;
+    file.write_all(&tb_res.stdout.as_bytes()).await?;
     file.write_all(b"STDERR: ###################\n").await?;
-    file.write_all(&tb_res.1.stderr.as_bytes()).await?;
+    file.write_all(&tb_res.stderr.as_bytes()).await?;
     drop(file);
     Ok(())
 }
