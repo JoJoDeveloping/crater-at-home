@@ -469,7 +469,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
         println!("Tagline: Tree Borrows fixes {percent:.1}% of all aliasing bugs!!1! (Newly broken: {percent_broken:.3}% of aliasing bugs, found across only {} crates)", crates_with_tb_error_count_nofilter);
         println!("  These crates are: {crates_with_tb_error:?}");
         crates_with_tb_error
-            .extract_if(|x, y| crates_with_sb_error.contains(x))
+            .extract_if(|x, _| crates_with_sb_error.contains(x))
             .for_each(|x| drop(x));
         println!("  After filtering out those with SB errors as well: {crates_with_tb_error:?}");
     }
