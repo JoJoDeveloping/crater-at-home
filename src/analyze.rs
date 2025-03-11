@@ -238,7 +238,7 @@ pub async fn run(args: Args, multi: MultiProgress) -> Result<()> {
     let mut count1 = 0;
     let exclude = as_list(&args.exclude, false);
     let include = as_list(&args.only, true);
-    let client = Arc::new(Client::new("output".into()).await?);
+    let client = Arc::new(Client::new(args.folder.clone()).await?);
     let crates_that_should_have_run = build_crate_list_discount(&args, &client).await?;
     let mut crates_that_should_have_run: BTreeMap<_, _> = crates_that_should_have_run
         .iter()
