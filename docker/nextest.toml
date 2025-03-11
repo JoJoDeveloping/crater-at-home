@@ -17,5 +17,3 @@ final-status-level = "none"
 [profile.slow-miri.junit] 
 path = "junit.xml"
 store-failure-output = true
-
-# unfiltered timeouts were 1340 in 2275-3793 crates before deploying timeout doubling
