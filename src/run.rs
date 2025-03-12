@@ -259,6 +259,9 @@ async fn save_and_push_logs(
     let mut file = File::create(format!("{}/{crate_base}/global_log.txt", args.output_dir)).await?;
     file.write_all(output).await?;
     drop(file);
+    if args.no_push {
+        return Ok(());
+    }
     let lock = mutex.acquire().await?;
     let mut git_add = tokio::process::Command::new("git");
     git_add
@@ -350,6 +353,9 @@ async fn git_check_crate_committed(
     krate: &Crate,
     args: &Args,
 ) -> Result<bool> {
+    if args.no_push {
+        return Ok(false);
+    }
     let crate_base = format!("{}@{}", krate.name, krate.version);
     let lock = mutex.acquire().await?;
     let mut git_add = tokio::process::Command::new("git");
@@ -415,10 +421,12 @@ fn spawn_worker(args: &Args, cpu: usize) -> tokio::process::Child {
         // Setting --memory-swap to the same value turns off swap
         &format!("--memory-swap={}g", args.memory_limit_gb),
         "crater-at-home:latest",
-    ])
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::inherit())
-    .spawn()
-    .unwrap()
+    ]);
+    cmd.
+    println!("{cmd:?}");
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap()
 }
