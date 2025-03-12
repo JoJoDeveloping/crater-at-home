@@ -1,4 +1,4 @@
-FROM ghcr.io/saethlin/crates-build-env:latest
+FROM ghcr.io/saethlin/crates-build-env:latest@sha256:ad50a1e5d776d7621862f811f9374e02ae9b9f49ca033adcc1741aff6a97ab63
 
 ENV PATH=/root/.cargo/bin:$PATH
 
@@ -16,8 +16,8 @@ COPY nextest.toml /root/.cargo/nextest.toml
 COPY .gitconfig /root/.gitconfig
 
 ADD "https://api.github.com/repos/JoJoDeveloping/miri/commits?per_page=1&sha=miri-for-test-run" latest_commit
-RUN cd /tmp && git clone https://github.com/JoJoDeveloping/miri.git -b miri-for-test-run && cd miri && \
-    ./miri toolchain && ./miri install
+RUN cd /tmp && git clone https://github.com/JoJoDeveloping/miri.git && cd miri && \
+    git checkout aea2a31494c7d21625d44145fdb582763dae4bfc && ./miri toolchain && ./miri install
     
 
 COPY run.sh /root/run.sh
