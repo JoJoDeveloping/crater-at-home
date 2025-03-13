@@ -30,29 +30,56 @@ const IGNORED_CRATES: &[&str] = &[
 #[derive(Parser, Clone)]
 pub struct Args {
     /// Run the top `n` most-recently-downloaded crates
-    #[clap(long, conflicts_with = "crate_list")]
+    #[clap(
+        long,
+        conflicts_with = "crate_list",
+        help = "Analyze the n-most downloaded crates."
+    )]
     crates: Option<usize>,
 
     /// A path to a file containing a whitespace-separated list of crates to run
-    #[clap(long, conflicts_with = "crates")]
+    #[clap(
+        long,
+        conflicts_with = "crates",
+        help = "Analyze precisely these crates."
+    )]
     crate_list: Option<String>,
 
-    #[clap(long, default_value_t = 8)]
+    #[clap(
+        long,
+        default_value_t = 8,
+        help = "The memory limit for each docker container."
+    )]
     memory_limit_gb: usize,
 
-    #[clap(long, action)]
+    #[clap(
+        long,
+        action,
+        help = "Usually the log output folder is a git repository, and logs are committed and pushed. This flag disables git pushing."
+    )]
     no_push: bool,
 
-    #[clap(long, action)]
+    #[clap(
+        long,
+        action,
+        help = "Print every docker container's output to the console as well."
+    )]
     live_log: bool,
 
-    #[clap(long)]
+    #[clap(long, help = "How many docker containers run in parallel")]
     jobs: Option<usize>,
 
-    #[clap(long)]
+    #[clap(long, help = "Whether to start with the least downloaded crates")]
     rev: bool,
 
-    #[clap(long, default_value = "output")]
+    #[clap(long, help = "Disables running [docker build] at the beginning")]
+    no_docker_build: bool,
+
+    #[clap(
+        long,
+        default_value = "output",
+        help = "The folder where the output is saved to"
+    )]
     output_dir: String,
 
     #[clap(
@@ -102,15 +129,17 @@ async fn build_crate_list(args: &Args, client: &Client) -> Result<(Vec<Crate>, b
 
 #[tokio::main]
 pub async fn run(args: Args) -> Result<()> {
-    let dockerfile = if std::env::var_os("CI").is_some() {
-        "docker/Dockerfile.ci"
-    } else {
-        "docker/Dockerfile"
-    };
-    let status = std::process::Command::new("docker")
-        .args(["build", "-t", "crater-at-home", "-f", dockerfile, "docker/"])
-        .status()?;
-    color_eyre::eyre::ensure!(status.success(), "docker image build failed!");
+    if !args.no_docker_build {
+        let dockerfile = if std::env::var_os("CI").is_some() {
+            "docker/Dockerfile.ci"
+        } else {
+            "docker/Dockerfile"
+        };
+        let status = std::process::Command::new("docker")
+            .args(["build", "-t", "crater-at-home", "-f", dockerfile, "docker/"])
+            .status()?;
+        color_eyre::eyre::ensure!(status.success(), "docker image build failed!");
+    }
 
     log::info!("Figuring out what crates have a build log already");
     let client = Arc::new(Client::new(args.output_dir.clone()).await?);
@@ -422,8 +451,6 @@ fn spawn_worker(args: &Args, cpu: usize) -> tokio::process::Child {
         &format!("--memory-swap={}g", args.memory_limit_gb),
         "crater-at-home:latest",
     ]);
-    cmd.
-    println!("{cmd:?}");
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
